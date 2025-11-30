@@ -1,5 +1,3 @@
-"""General helpers for NeuralPaint."""
-
 from __future__ import annotations
 
 from typing import Optional, Sequence, Tuple

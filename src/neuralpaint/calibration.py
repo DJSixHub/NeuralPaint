@@ -1,5 +1,3 @@
-"""Calibration helpers for NeuralPaint."""
-
 from __future__ import annotations
 
 import sys

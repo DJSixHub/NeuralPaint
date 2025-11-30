@@ -1,5 +1,3 @@
-"""Overlay window handling for NeuralPaint."""
-
 from __future__ import annotations
 
 import ctypes

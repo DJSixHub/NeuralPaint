@@ -1,5 +1,3 @@
-"""Color selection wheel overlay and interaction."""
-
 from __future__ import annotations
 
 import math

@@ -1,5 +1,3 @@
-"""Main interactive application loop for NeuralPaint."""
-
 from __future__ import annotations
 
 import ctypes
@@ -121,9 +119,17 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 drawing_active = False
             elif not color_picker.active:
                 if command == CommandType.DRAW_MODE:
-                    interaction_mode = InteractionMode.DRAW
+                    if interaction_mode == InteractionMode.DRAW:
+                        interaction_mode = InteractionMode.IDLE
+                        drawing_active = False
+                    else:
+                        interaction_mode = InteractionMode.DRAW
                 elif command == CommandType.ERASE_MODE:
-                    interaction_mode = InteractionMode.ERASE
+                    if interaction_mode == InteractionMode.ERASE:
+                        interaction_mode = InteractionMode.IDLE
+                    else:
+                        interaction_mode = InteractionMode.ERASE
+                    drawing_active = False
 
             pointer_cam: Optional[Tuple[float, float]] = extract_pointer_position(
                 result,

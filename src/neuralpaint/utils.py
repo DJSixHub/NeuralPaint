@@ -35,3 +35,21 @@ def exponential_smooth(
         alpha * current[0] + (1 - alpha) * previous[0],
         alpha * current[1] + (1 - alpha) * previous[1],
     )
+
+
+def surface_corners_in_camera(
+    inverse_homography: np.ndarray,
+    width: float,
+    height: float,
+) -> np.ndarray:
+    corners = np.array(
+        [
+            [0.0, 0.0],
+            [width, 0.0],
+            [width, height],
+            [0.0, height],
+        ],
+        dtype=np.float32,
+    ).reshape(-1, 1, 2)
+    camera_points = cv2.perspectiveTransform(corners, inverse_homography.astype(np.float32))
+    return camera_points.reshape(-1, 2)

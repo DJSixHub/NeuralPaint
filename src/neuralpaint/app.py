@@ -18,7 +18,20 @@ from .color_picker import ColorPicker
 from .gestures import CommandType, InteractionMode, ArmGestureClassifier, classify_left_arm_command
 from .overlay import HAS_OVERLAY_SUPPORT, OverlayWindow, draw_status_banner
 from .strokes import StrokeCanvas
-from .utils import clamp_point, exponential_smooth, is_inside_surface, project_point
+from .utils import (
+    clamp_point,
+    exponential_smooth,
+    is_inside_surface,
+    project_point,
+    surface_corners_in_camera,
+)
+
+MODE_LABELS = {
+    InteractionMode.IDLE: "INACTIVO",
+    InteractionMode.DRAW: "DIBUJAR",
+    InteractionMode.ERASE: "BORRAR",
+    InteractionMode.COLOR_SELECT: "COLORES",
+}
 
 
 def extract_pointer_position(
@@ -70,6 +83,11 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
     drawing_active = False
     interaction_mode = InteractionMode.IDLE
     last_mode_before_picker = InteractionMode.DRAW
+    toggle_delay = max(0.0, float(args.mode_toggle_delay))
+    mode_activated_at = {
+        InteractionMode.DRAW: 0.0,
+        InteractionMode.ERASE: 0.0,
+    }
 
     screen_width = ctypes.windll.user32.GetSystemMetrics(0)
     screen_height = ctypes.windll.user32.GetSystemMetrics(1)
@@ -77,6 +95,7 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
     scale_x = screen_width / calibration.surface_width
     scale_y = screen_height / calibration.surface_height
     preview_scale = float(np.clip(args.preview_scale, 0.05, 0.5))
+    surface_polygon_cam: Optional[np.ndarray] = None
 
     try:
         while True:
@@ -86,6 +105,12 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 break
 
             frame_height, frame_width = frame.shape[:2]
+            if surface_polygon_cam is None:
+                surface_polygon_cam = surface_corners_in_camera(
+                    calibration.inverse_homography,
+                    calibration.surface_width,
+                    calibration.surface_height,
+                )
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             result = holistic.process(rgb)
 
@@ -107,6 +132,7 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             raw_command = classify_left_arm_command(result.pose_landmarks)
             command = command_classifier.update(raw_command)
 
+            now = time.perf_counter()
             if command == CommandType.CLEAR_ALL:
                 stroke_canvas.clear()
                 drawing_active = False
@@ -120,15 +146,19 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             elif not color_picker.active:
                 if command == CommandType.DRAW_MODE:
                     if interaction_mode == InteractionMode.DRAW:
-                        interaction_mode = InteractionMode.IDLE
-                        drawing_active = False
+                        if now - mode_activated_at[InteractionMode.DRAW] >= toggle_delay:
+                            interaction_mode = InteractionMode.IDLE
+                            drawing_active = False
                     else:
                         interaction_mode = InteractionMode.DRAW
+                        mode_activated_at[InteractionMode.DRAW] = now
                 elif command == CommandType.ERASE_MODE:
                     if interaction_mode == InteractionMode.ERASE:
-                        interaction_mode = InteractionMode.IDLE
+                        if now - mode_activated_at[InteractionMode.ERASE] >= toggle_delay:
+                            interaction_mode = InteractionMode.IDLE
                     else:
                         interaction_mode = InteractionMode.ERASE
+                        mode_activated_at[InteractionMode.ERASE] = now
                     drawing_active = False
 
             pointer_cam: Optional[Tuple[float, float]] = extract_pointer_position(
@@ -176,6 +206,8 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                     stroke_canvas.set_color(selected_color)
                     color_picker.deactivate()
                     interaction_mode = last_mode_before_picker
+                    if interaction_mode in mode_activated_at:
+                        mode_activated_at[interaction_mode] = time.perf_counter()
 
             pointer_color = stroke_canvas.brush_color
             if interaction_mode == InteractionMode.ERASE:
@@ -225,6 +257,14 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             preview_width = int(screen_width * preview_scale)
             if preview_height > 0 and preview_width > 0:
                 preview_image = cv2.flip(frame, 1) if args.flip_view else frame.copy()
+                if surface_polygon_cam is not None and np.isfinite(surface_polygon_cam).all():
+                    polygon = surface_polygon_cam.copy()
+                    polygon[:, 0] = np.clip(polygon[:, 0], 0, frame_width - 1)
+                    polygon[:, 1] = np.clip(polygon[:, 1], 0, frame_height - 1)
+                    if args.flip_view:
+                        polygon[:, 0] = frame_width - 1 - polygon[:, 0]
+                    polygon_int = polygon.astype(np.int32)
+                    cv2.polylines(preview_image, [polygon_int], True, (0, 255, 255), 2, cv2.LINE_AA)
                 if pointer_preview_point is not None:
                     cv2.circle(preview_image, pointer_preview_point, 10, pointer_color, -1, cv2.LINE_AA)
 
@@ -239,10 +279,11 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 x_end = min(10 + preview_width, screen_width)
                 overlay_frame[10:y_end, 10:x_end] = preview_patch[: y_end - 10, : x_end - 10]
 
+            mode_label = MODE_LABELS.get(interaction_mode, interaction_mode.name)
             status_lines = [
-                f"MODE: {interaction_mode.name}",
-                "Left arm → horiz+up draw | horiz+down erase | up clear | horiz hold color",
-                "Keys: q quit | c clear",
+                f"MODO: {mode_label}",
+                "Brazo izquierdo -> horiz+arriba dibuja | horiz+abajo borra | arriba limpia | horiz mantiene color",
+                "Teclas: q salir | c limpiar",
             ]
             draw_status_banner(overlay_frame, status_lines)
 

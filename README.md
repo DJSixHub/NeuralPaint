@@ -20,7 +20,7 @@ pip install opencv-contrib-python mediapipe numpy pywin32
 	python src/neural_paint.py --camera 0 --calibration-only --calibration-warp
 	```
 
-	Ajusta `--camera` si utilizas una cámara diferente y, opcionalmente, `--surface-width` y `--surface-height` para definir el lienzo lógico. Usa `--calibration-debug` para ver el mapa de bordes si necesitas afinar parámetros. La vista se muestra espejada por defecto; agrega `--no-flip` si prefieres la perspectiva directa de la cámara.
+	Ajusta `--camera` si utilizas una cámara diferente. El lienzo lógico se ajusta automáticamente a la resolución actual de la pantalla principal (puedes sobrescribirlo con `--surface-width` y `--surface-height`). Usa `--calibration-debug` para ver el mapa de bordes si necesitas afinar parámetros. La vista se muestra espejada por defecto; agrega `--no-flip` si prefieres la perspectiva directa de la cámara.
 3. Cuando el contorno verde coincida con la superficie y aparezca “Surface detected”, presiona `s` para guardar `calibration/homography.npz`. Presiona `q` para salir sin guardar.
 
 El archivo guardado contiene la homografía y los metadatos necesarios para mapear la posición de la mano al plano de dibujo.
@@ -42,8 +42,10 @@ El archivo guardado contiene la homografía y los metadatos necesarios para mape
 	- **Limpiar todo**: brazo izquierdo completamente extendido hacia arriba. Borra todos los trazos y regresa a modo inactivo.
 	- **Selector de color**: brazo izquierdo totalmente extendido en horizontal (antebrazo alineado con el suelo). Aparece una rueda de 10 colores sobre la imagen de la cámara; coloca la mano derecha encima del color deseado y mantenla 3 s para aplicarlo al pincel.
 	- El puntero se apoya en la punta del índice derecho; si no se distingue, recurre a la muñeca.
+	- El recuadro de cámara resalta permanentemente el contorno de la superficie detectada para que sepas dónde impactarán los trazos sobre la pantalla real.
+	 - Repetir el gesto de dibujar o borrar tarda 3 s en devolver el sistema a modo inactivo para evitar cambios accidentales (ajustable con `--mode-toggle-delay`).
 4. Atajos de teclado: `q` salir, `c` limpiar el lienzo actual.
 
-Parámetros adicionales útiles: `--command-hold-frames` (frames consecutivos necesarios para aceptar un gesto), `--erase-radius` (radio de borrado en píxeles), `--preview-scale` (tamaño relativo del recuadro de cámara) y `--brush-thickness` (ancho del trazo en píxeles del lienzo lógico).
+Parámetros adicionales útiles: `--command-hold-frames` (frames consecutivos necesarios para aceptar un gesto), `--erase-radius` (radio de borrado en píxeles), `--preview-scale` (tamaño relativo del recuadro de cámara), `--brush-thickness` (ancho del trazo en píxeles del lienzo lógico), `--mode-toggle-delay` (segundos mínimos antes de regresar a idle repitiendo un gesto) y `--surface-width/--surface-height` (solo si deseas forzar un lienzo distinto de la pantalla principal).
 
 El programa crea un overlay transparente encima de tu escritorio; cierra con `q` desde la consola.

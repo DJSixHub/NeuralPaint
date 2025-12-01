@@ -1,0 +1,103 @@
+{
+  "image": "frame_00002.png",
+  "resolution": [
+    1280,
+    720
+  ],
+  "seed": 1002,
+  "projection_corners": [
+    [
+      450.562,
+      270.983
+    ],
+    [
+      806.116,
+      229.957
+    ],
+    [
+      794.684,
+      432.686
+    ],
+    [
+      465.287,
+      496.774
+    ]
+  ],
+  "projection_width": 2.0012866075540443,
+  "projection_height": 1.2334500482547546,
+  "room_dimensions": [
+    5.302371017554772,
+    5.26375060303442,
+    2.720945173083247
+  ],
+  "wall_texture": "OIP (1).webp",
+  "projection_image": "Gemini_Generated_Image_g58ewfg58ewfg58e.png",
+  "projection_strength": 14.055,
+  "camera_location": [
+    1.0898,
+    -0.0969,
+    2.4219
+  ],
+  "camera_rotation": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "projector_location": [
+    0.1221,
+    -0.1161,
+    2.1133
+  ],
+  "projector_energy": 2487.53,
+  "ambient": {
+    "environment_strength": 1.461,
+    "environment_color": [
+      0.7244,
+      0.5622,
+      0.5893
+    ],
+    "ceiling_light_energy": 430.68
+  },
+  "obstacle_count": 3,
+  "obstacles": [
+    {
+      "shape": "SPHERE",
+      "location": [
+        0.2187,
+        -1.7669,
+        1.4126
+      ],
+      "scale": [
+        0.2447,
+        0.4987,
+        0.3911
+      ]
+    },
+    {
+      "shape": "CUBE",
+      "location": [
+        -0.4575,
+        -2.3159,
+        1.7484
+      ],
+      "scale": [
+        0.3634,
+        0.501,
+        0.4613
+      ]
+    },
+    {
+      "shape": "SPHERE",
+      "location": [
+        -0.4081,
+        -1.5844,
+        1.0697
+      ],
+      "scale": [
+        0.4756,
+        0.5101,
+        1.1534
+      ]
+    }
+  ]
+}

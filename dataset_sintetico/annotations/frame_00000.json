@@ -1,0 +1,77 @@
+{
+  "image": "frame_00000.png",
+  "resolution": [
+    1280,
+    720
+  ],
+  "seed": 1000,
+  "projection_corners": [
+    [
+      350.516,
+      178.185
+    ],
+    [
+      966.271,
+      184.155
+    ],
+    [
+      944.834,
+      551.456
+    ],
+    [
+      367.518,
+      506.856
+    ]
+  ],
+  "projection_width": 2.8192228812849294,
+  "projection_height": 1.639774241098729,
+  "room_dimensions": [
+    5.94339160675141,
+    6.009476678677749,
+    2.599139603924817
+  ],
+  "wall_texture": "OIP (2).webp",
+  "projection_image": "Gemini_Generated_Image_g58ewfg58ewfg58e.png",
+  "projection_strength": 8.326,
+  "camera_location": [
+    -0.5459,
+    -0.518,
+    1.8189
+  ],
+  "camera_rotation": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "projector_location": [
+    -0.0307,
+    -0.8421,
+    2.1737
+  ],
+  "projector_energy": 4922.87,
+  "ambient": {
+    "environment_strength": 1.443,
+    "environment_color": [
+      0.3116,
+      0.7168,
+      0.5342
+    ],
+    "ceiling_light_energy": 393.44
+  },
+  "obstacle_count": 1,
+  "obstacles": [
+    {
+      "shape": "SPHERE",
+      "location": [
+        -0.3397,
+        -2.6919,
+        1.2822
+      ],
+      "scale": [
+        0.1881,
+        0.4493,
+        0.398
+      ]
+    }
+  ]
+}

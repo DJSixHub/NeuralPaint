@@ -1,9 +1,11 @@
+"""Color selection wheel overlay and interaction."""
+
 from __future__ import annotations
 
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -11,17 +13,18 @@ import numpy as np
 Color = Tuple[int, int, int]
 
 
+# Colors are in BGR (OpenCV default) and intentionally distinct.
 DEFAULT_PALETTE: Sequence[Color] = (
-    (255, 255, 255),
-    (0, 0, 0),
-    (255, 0, 0),
-    (0, 255, 0),
-    (0, 0, 255),
-    (255, 255, 0),
-    (0, 255, 255),
-    (255, 0, 255),
-    (255, 128, 0),
-    (128, 0, 255),
+    (180, 0, 180),  # purple
+    (255, 0, 255),  # magenta
+    (255, 0, 0),  # blue
+    (255, 255, 0),  # cyan
+    (0, 255, 0),  # green
+    (0, 255, 255),  # yellow
+    (0, 128, 255),  # orange
+    (0, 0, 255),  # red
+    (20, 20, 20),  # near-black
+    (255, 255, 255),  # white
 )
 
 
@@ -37,6 +40,7 @@ class ColorPicker:
         self.inner_radius: int = 0
         self._current_index: Optional[int] = None
         self._hold_started: Optional[float] = None
+        self._display_colors: List[Color] = list(self.palette)
 
     def activate(self, frame_shape: Tuple[int, int, int]) -> None:
         height, width = frame_shape[:2]
@@ -57,14 +61,15 @@ class ColorPicker:
             return
 
         overlay = image.copy()
-        num_colors = len(self.palette)
+        num_colors = len(self._display_colors)
+        if num_colors == 0:
+            return
         sweep = 360.0 / num_colors
         highlight = self._current_index if pointer is not None else None
 
-        for idx, color in enumerate(self.palette):
+        for idx, color in enumerate(self._display_colors):
             start_angle = sweep * idx
             end_angle = start_angle + sweep
-            thickness = -1
             cv2.ellipse(
                 overlay,
                 self.center,
@@ -73,7 +78,7 @@ class ColorPicker:
                 start_angle,
                 end_angle,
                 color,
-                thickness,
+                -1,
                 cv2.LINE_AA,
             )
 
@@ -99,7 +104,7 @@ class ColorPicker:
         if highlight is not None:
             cv2.putText(
                 image,
-                "Hold to select",
+                "Mantener para seleccionar",
                 (self.center[0] - self.radius, self.center[1] + self.radius + 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
@@ -134,14 +139,14 @@ class ColorPicker:
             self._hold_started = None
             return None
 
-        index = self._hit_test(pointer)
-        if index is None:
+        sector = self._hit_test(pointer)
+        if sector is None:
             self._current_index = None
             self._hold_started = None
             return None
 
-        if self._current_index != index:
-            self._current_index = index
+        if self._current_index != sector:
+            self._current_index = sector
             self._hold_started = now
             return None
 
@@ -156,6 +161,9 @@ class ColorPicker:
         return None
 
     def _hit_test(self, pointer: Tuple[int, int]) -> Optional[int]:
+        if not self._display_colors:
+            return None
+
         dx = pointer[0] - self.center[0]
         dy = pointer[1] - self.center[1]
         distance = math.hypot(dx, dy)
@@ -163,5 +171,5 @@ class ColorPicker:
             return None
 
         angle = math.degrees(math.atan2(-dy, dx)) % 360.0
-        sweep = 360.0 / len(self.palette)
-        return int(angle // sweep)
+        sweep = 360.0 / len(self._display_colors)
+        return int(angle // sweep) % len(self._display_colors)

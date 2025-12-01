@@ -149,7 +149,7 @@ def draw_calibration_overlay(frame: np.ndarray, polygon: Optional[np.ndarray], m
     )
     cv2.putText(
         overlay,
-        "Press 's' to save calibration, 'q' to quit",
+        "Pulsa 's' para guardar la calibracion, 'q' para salir",
         (20, 65),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.6,
@@ -190,7 +190,7 @@ def run_auto_calibration(args: Namespace) -> Optional[CalibrationData]:
                     homography = None
                 if homography is not None:
                     latest = CalibrationResult(polygon=polygon, homography=homography)
-                    message = "Surface detected"
+                    message = "Superficie detectada"
                     if args.calibration_warp:
                         warped = cv2.warpPerspective(
                             frame,
@@ -200,9 +200,9 @@ def run_auto_calibration(args: Namespace) -> Optional[CalibrationData]:
                         display_warped = cv2.flip(warped, 1) if getattr(args, "flip_view", False) else warped
                         cv2.imshow("Warped", display_warped)
                 else:
-                    message = "Rectangle found but homography failed"
+                    message = "Rectangulo encontrado pero la homografia fallo"
             else:
-                message = "Show a bright rectangle covering the target area"
+                message = "Muestra un rectangulo brillante que cubra el area"
 
             overlay = draw_calibration_overlay(frame, polygon, message)
             display_overlay = cv2.flip(overlay, 1) if getattr(args, "flip_view", False) else overlay

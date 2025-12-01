@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -17,8 +18,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=Path("calibration") / "homography.npz",
         help="Path to save/read the homography calibration.",
     )
-    parser.add_argument("--surface-width", type=float, default=1280.0, help="Logical canvas width in pixels.")
-    parser.add_argument("--surface-height", type=float, default=720.0, help="Logical canvas height in pixels.")
+    parser.add_argument(
+        "--surface-width",
+        type=float,
+        default=0.0,
+        help="Logical canvas width in pixels (0 = usar resolución de pantalla).",
+    )
+    parser.add_argument(
+        "--surface-height",
+        type=float,
+        default=0.0,
+        help="Logical canvas height in pixels (0 = usar resolución de pantalla).",
+    )
     parser.add_argument("--calibration-min-area", type=float, default=0.15, help="Minimum contour area ratio (0-1).")
     parser.add_argument(
         "--calibration-approx-eps",
@@ -38,6 +49,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--erase-radius", type=float, default=35.0, help="Radius in pixels for erasing strokes.")
     parser.add_argument("--preview-scale", type=float, default=0.25, help="Fraction of window height used for the camera preview (0-0.5).")
     parser.add_argument("--brush-thickness", type=float, default=4.0, help="Brush thickness for newly created strokes in surface pixels.")
+    parser.add_argument("--mode-toggle-delay", type=float, default=3.0, help="Seconds to wait before a repeated draw/erase gesture returns to idle.")
     parser.add_argument("--no-flip", action="store_true", help="Disable mirrored preview windows.")
     return parser.parse_args(argv)
 
@@ -45,6 +57,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     args.flip_view = not args.no_flip
+    if args.surface_width <= 0 or args.surface_height <= 0:
+        screen_width = ctypes.windll.user32.GetSystemMetrics(0)
+        screen_height = ctypes.windll.user32.GetSystemMetrics(1)
+        args.surface_width = float(max(1, screen_width))
+        args.surface_height = float(max(1, screen_height))
     calibration = ensure_calibration(args)
     if calibration is None:
         return 1

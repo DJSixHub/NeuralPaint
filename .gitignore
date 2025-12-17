@@ -9,3 +9,10 @@ dataset_sintetico/
 models/
 *.webp
 *.avif
+*.ttf
+*.otf
+*.woff2
+*.zip
+Reconocimiento de Caracteres/assets/fonts/
+*.woff2
+*.woff

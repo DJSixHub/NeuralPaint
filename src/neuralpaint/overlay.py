@@ -1,3 +1,4 @@
+# Ventana de superposición transparente sobre Windows para mostrar el lienzo.
 from __future__ import annotations
 
 import ctypes
@@ -6,26 +7,30 @@ from typing import Optional, Sequence
 import cv2
 import numpy as np
 
-try:  # Windows layered overlay support
+try:  # pragma: no cover - soporte de superposición en Windows
     import win32api  # type: ignore
     import win32con  # type: ignore
     import win32gui  # type: ignore
     import win32ui  # type: ignore
-except ImportError:  # pragma: no cover - requires pywin32
+except ImportError:  # pragma: no cover - requiere pywin32 instalado
     win32api = win32con = win32gui = win32ui = None
 
 
+# HAS_OVERLAY_SUPPORT indica si pywin32 está disponible para crear la ventana.
 HAS_OVERLAY_SUPPORT = all(module is not None for module in (win32api, win32con, win32gui, win32ui))
 
 
+# POINT define una estructura Win32 con coordenadas enteras.
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
+# SIZE define un tamaño ancho/alto para llamadas Win32.
 class SIZE(ctypes.Structure):
     _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
 
 
+# BLENDFUNCTION controla la operación alpha blending de GDI.
 class BLENDFUNCTION(ctypes.Structure):
     _fields_ = [
         ("BlendOp", ctypes.c_byte),
@@ -36,6 +41,7 @@ class BLENDFUNCTION(ctypes.Structure):
 
 
 if HAS_OVERLAY_SUPPORT:
+    # BITMAPINFOHEADER describe el formato de un bitmap compatible con GDI.
     class BITMAPINFOHEADER(ctypes.Structure):
         _fields_ = [
             ("biSize", ctypes.c_uint32),
@@ -52,6 +58,7 @@ if HAS_OVERLAY_SUPPORT:
         ]
 
 
+    # RGBQUAD almacena componentes de color para paletas.
     class RGBQUAD(ctypes.Structure):
         _fields_ = [
             ("rgbBlue", ctypes.c_byte),
@@ -61,6 +68,7 @@ if HAS_OVERLAY_SUPPORT:
         ]
 
 
+    # BITMAPINFO agrupa cabecera y colores para CreateDIBSection.
     class BITMAPINFO(ctypes.Structure):
         _fields_ = [
             ("bmiHeader", BITMAPINFOHEADER),
@@ -68,15 +76,15 @@ if HAS_OVERLAY_SUPPORT:
         ]
 
 
+# OverlayWindow genera una ventana siempre visible con soporte BGRA y alpha.
 class OverlayWindow:
-    """Topmost transparent window that renders BGRA frames with per-pixel alpha."""
 
     _class_atom: Optional[int] = None
 
-    def __init__(self, width: int, height: int, title: str = "NeuralPaint Overlay") -> None:
+    def __init__(self, width: int, height: int, title: str = "Superposicion NeuralPaint") -> None:
         if not HAS_OVERLAY_SUPPORT:
             raise RuntimeError(
-                "pywin32 is required for overlay rendering. Install it via 'pip install pywin32'."
+                "pywin32 es obligatorio para renderizar la superposición. Instálalo con 'pip install pywin32'."
             )
 
         self.width = int(width)
@@ -153,15 +161,16 @@ class OverlayWindow:
             return 0
         return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
+    # update recibe un frame BGRA (alto, ancho, 4) y lo envía a la ventana.
     def update(self, frame: np.ndarray) -> None:
         if frame.shape[0] != self.height or frame.shape[1] != self.width or frame.shape[2] != 4:
-            raise ValueError("Overlay frame must match window size and be BGRA (H, W, 4)")
+            raise ValueError("El frame debe coincidir en tamaño con la ventana y ser BGRA (H, W, 4)")
 
-        # Convert to pre-multiplied alpha and invert vertically for GDI
+        # Convertimos a alpha pre-multiplicado e invertimos verticalmente para GDI.
         premultiplied = frame.astype(np.uint8)
         alpha = premultiplied[..., 3:4].astype(np.float32) / 255.0
         premultiplied[..., :3] = (premultiplied[..., :3].astype(np.float32) * alpha).astype(np.uint8)
-        dib_data = np.ascontiguousarray(premultiplied[::-1])  # bottom-up
+        dib_data = np.ascontiguousarray(premultiplied[::-1])  # orientación inferior a superior
         bitmap = self._create_bitmap_from_buffer(dib_data)
         old_bitmap = self.mem_dc.SelectObject(bitmap)
 
@@ -185,19 +194,75 @@ class OverlayWindow:
         self.mem_dc.SelectObject(old_bitmap)
         win32gui.DeleteObject(bitmap.GetHandle())
 
+    # pump_messages vacía la cola de eventos de la ventana.
     def pump_messages(self) -> None:
-        while win32gui.PumpWaitingMessages():  # pragma: no branch - process events
+        while win32gui.PumpWaitingMessages():  # pragma: no branch - procesa eventos
             pass
 
+    # capture_region toma una captura BGR del escritorio en las coordenadas indicadas.
+    def capture_region(self, x: int, y: int, width: int, height: int) -> np.ndarray:
+        if width <= 0 or height <= 0:
+            return np.zeros((0, 0, 3), dtype=np.uint8)
+        capture_dc = None
+        mem_dc = None
+        bitmap = None
+        try:
+            capture_dc = win32ui.CreateDCFromHandle(self.screen_dc)
+            mem_dc = capture_dc.CreateCompatibleDC()
+            bitmap = win32ui.CreateBitmap()
+            bitmap.CreateCompatibleBitmap(capture_dc, width, height)
+            mem_dc.SelectObject(bitmap)
+            mem_dc.BitBlt((0, 0), (width, height), capture_dc, (x, y), win32con.SRCCOPY)
+
+            bits = bitmap.GetBitmapBits(True)
+            img = np.frombuffer(bits, dtype=np.uint8)
+            if img.size != width * height * 4:
+                return np.zeros((0, 0, 3), dtype=np.uint8)
+
+            img = img.reshape((height, width, 4))
+            bgr = np.flipud(img)[..., :3]
+            return np.ascontiguousarray(bgr)
+        except Exception:
+            return np.zeros((0, 0, 3), dtype=np.uint8)
+        finally:
+            if bitmap is not None:
+                try:
+                    handle = bitmap.GetHandle()
+                except Exception:
+                    handle = None
+                if handle:
+                    try:
+                        win32gui.DeleteObject(handle)
+                    except Exception:
+                        pass
+            if mem_dc is not None:
+                try:
+                    mem_dc.DeleteDC()
+                except Exception:
+                    pass
+            if capture_dc is not None:
+                try:
+                    capture_dc.DeleteDC()
+                except Exception:
+                    pass
+
+    # close libera los recursos Win32 y destruye la ventana.
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         win32gui.DestroyWindow(self.hwnd)
-        self.mem_dc.DeleteDC()
-        self.mfc_dc.DeleteDC()
+        try:
+            self.mem_dc.DeleteDC()
+        except Exception:
+            pass
+        try:
+            self.mfc_dc.DeleteDC()
+        except Exception:
+            pass
         win32gui.ReleaseDC(0, self.screen_dc)
 
+    # _create_bitmap_from_buffer crea un bitmap Win32 desde datos BGRA contiguos.
     def _create_bitmap_from_buffer(self, dib_data: np.ndarray):
         dib_bytes = dib_data.tobytes()
 
@@ -232,6 +297,7 @@ class OverlayWindow:
         return win32ui.CreateBitmapFromHandle(hbmp)
 
 
+# draw_status_banner pinta una banda semi-transparente con líneas de texto centradas.
 def draw_status_banner(
     image: np.ndarray,
     lines: Sequence[str],

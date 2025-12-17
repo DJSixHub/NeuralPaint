@@ -1,3 +1,4 @@
+# Clasificación de gestos de brazo y modos de interacción.
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ import mediapipe as mp
 import numpy as np
 
 
+# CommandType enumera los comandos detectados del brazo izquierdo.
 class CommandType(Enum):
     NONE = auto()
     DRAW_MODE = auto()
@@ -16,6 +18,7 @@ class CommandType(Enum):
     COLOR_PICKER = auto()
 
 
+# InteractionMode define el estado actual del flujo de dibujo.
 class InteractionMode(Enum):
     IDLE = auto()
     DRAW = auto()
@@ -23,15 +26,18 @@ class InteractionMode(Enum):
     COLOR_SELECT = auto()
 
 
+# ArmGestureClassifier estabiliza comandos cronometrando cuadros consecutivos.
 @dataclass
 class ArmGestureClassifier:
     hold_frames: int
 
+    # __post_init__ garantiza un mínimo de cuadros y reinicia el estado interno.
     def __post_init__(self) -> None:
         self.hold_frames = max(1, self.hold_frames)
         self._last_raw: CommandType = CommandType.NONE
         self._counter: int = 0
 
+    # update recibe un CommandType crudo y devuelve uno confirmado o None.
     def update(self, raw: CommandType) -> Optional[CommandType]:
         if raw == self._last_raw:
             self._counter += 1
@@ -48,10 +54,12 @@ class ArmGestureClassifier:
         return None
 
 
+# _to_vec convierte un landmark de MediaPipe a un vector numpy (x, y).
 def _to_vec(landmark) -> np.ndarray:
     return np.array([landmark.x, landmark.y], dtype=np.float32)
 
 
+# classify_left_arm_command analiza el brazo izquierdo y devuelve un CommandType.
 def classify_left_arm_command(
     pose_landmarks: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
     min_visibility: float = 0.5,
@@ -103,3 +111,5 @@ def classify_left_arm_command(
     if horizontal and forearm_horizontal:
         return CommandType.COLOR_PICKER
     return CommandType.NONE
+
+

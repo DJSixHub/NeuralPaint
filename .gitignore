@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.png
+*.json
+*.pth
+*.npz
+Dataset/
+dataset_sintetico/
+models/
+*.webp
+*.avif

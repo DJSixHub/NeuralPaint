@@ -1,4 +1,4 @@
-"""Color selection wheel overlay and interaction."""
+# Rueda de colores para seleccionar tonos mediante la mano detectada.
 
 from __future__ import annotations
 
@@ -10,29 +10,32 @@ from typing import List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
+# Color representa un color en formato BGR de OpenCV.
 Color = Tuple[int, int, int]
 
-
-# Colors are in BGR (OpenCV default) and intentionally distinct.
+# DEFAULT_PALETTE define los colores disponibles en el selector en formato BGR.
 DEFAULT_PALETTE: Sequence[Color] = (
-    (180, 0, 180),  # purple
+    (180, 0, 180),  # morado
     (255, 0, 255),  # magenta
-    (255, 0, 0),  # blue
-    (255, 255, 0),  # cyan
-    (0, 255, 0),  # green
-    (0, 255, 255),  # yellow
-    (0, 128, 255),  # orange
-    (0, 0, 255),  # red
-    (20, 20, 20),  # near-black
-    (255, 255, 255),  # white
+    (255, 0, 0),  # azul
+    (255, 255, 0),  # cian
+    (0, 255, 0),  # verde
+    (0, 255, 255),  # amarillo
+    (0, 128, 255),  # naranja
+    (0, 0, 255),  # rojo
+    (20, 20, 20),  # casi negro
+    (255, 255, 255),  # blanco
 )
 
 
+# ColorPicker maneja la activación y lectura de la rueda de colores.
 @dataclass
 class ColorPicker:
+    # palette define los colores disponibles y hold_seconds controla el tiempo para confirmar.
     palette: Sequence[Color] = field(default_factory=lambda: DEFAULT_PALETTE)
     hold_seconds: float = 3.0
 
+    # __post_init__ prepara los campos internos después de crear la instancia.
     def __post_init__(self) -> None:
         self.active: bool = False
         self.center: Tuple[int, int] = (0, 0)
@@ -42,6 +45,7 @@ class ColorPicker:
         self._hold_started: Optional[float] = None
         self._display_colors: List[Color] = list(self.palette)
 
+    # activate calcula el centro y radio a partir de la forma del cuadro (alto, ancho, canales).
     def activate(self, frame_shape: Tuple[int, int, int]) -> None:
         height, width = frame_shape[:2]
         self.radius = max(60, min(height, width) // 4)
@@ -51,11 +55,13 @@ class ColorPicker:
         self._current_index = None
         self._hold_started = None
 
+    # deactivate apaga la rueda y limpia el estado interno.
     def deactivate(self) -> None:
         self.active = False
         self._current_index = None
         self._hold_started = None
 
+    # draw pinta la rueda en la imagen y resalta el sector cercano al puntero.
     def draw(self, image: np.ndarray, pointer: Optional[Tuple[int, int]] = None) -> None:
         if not self.active or self.radius <= 0:
             return
@@ -128,6 +134,7 @@ class ColorPicker:
                     cv2.LINE_AA,
                 )
 
+    # update recibe el puntero en pixeles y devuelve un color BGR seleccionado o None.
     def update(self, pointer: Optional[Tuple[int, int]]) -> Optional[Color]:
         if not self.active:
             return None
@@ -160,6 +167,7 @@ class ColorPicker:
             return selected
         return None
 
+    # _hit_test calcula el índice del sector donde cae el puntero y devuelve None si está fuera.
     def _hit_test(self, pointer: Tuple[int, int]) -> Optional[int]:
         if not self._display_colors:
             return None
@@ -170,6 +178,9 @@ class ColorPicker:
         if distance < self.inner_radius or distance > self.radius:
             return None
 
-        angle = math.degrees(math.atan2(-dy, dx)) % 360.0
+        # cv2.ellipse usa el eje X hacia la derecha y recorre los ángulos en sentido horario
+        # (debido a que las coordenadas de imagen crecen hacia abajo). Calculamos el ángulo
+        # en el mismo sistema para que el sector coincida con la vista.
+        angle = math.degrees(math.atan2(dy, dx)) % 360.0
         sweep = 360.0 / len(self._display_colors)
         return int(angle // sweep) % len(self._display_colors)

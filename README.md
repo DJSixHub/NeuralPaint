@@ -1,51 +1,67 @@
 # NeuralPaint
-A piece of software for you to "draw" into TVs or projected screens using only a camera to track your movements.
+Herramienta para dibujar sobre televisores o pantallas proyectadas usando solo una cámara para seguir tus manos.
 
-## Prerequisitos
+## Instalación rápida
 
 - Python 3.10 o superior
-- [pip](https://pip.pypa.io/)
-- Paquetes Python: `opencv-contrib-python`, `numpy`, `mediapipe`, `pywin32`
+- [pip](https://pip.pypa.io/) actualizado
+- Recomendado: crear y activar un entorno virtual (`python -m venv .venv`, luego `.\.venv\Scripts\Activate.ps1`)
+
+Instala las dependencias esenciales:
 
 ```powershell
-pip install opencv-contrib-python mediapipe numpy pywin32
+pip install opencv-contrib-python mediapipe numpy pywin32 easyocr torch torchvision torchaudio
 ```
 
-## Calibración de la superficie de proyección (integrada)
+> Si tu GPU no soporta CUDA, omite los paquetes de Torch o usa una versión solo CPU.
 
-1. Proyecta una diapositiva de alto contraste donde la zona útil sea un **rectángulo brillante** sobre un fondo más oscuro.
-2. Lanza el modo de calibración:
+## Uso rápido del programa
 
-	```powershell
-	python src/neural_paint.py --camera 0 --calibration-only --calibration-warp
-	```
+1. **Calibrar la superficie** (solo la primera vez o cuando cambies la geometría):
 
-	Ajusta `--camera` si utilizas una cámara diferente. El lienzo lógico se ajusta automáticamente a la resolución actual de la pantalla principal (puedes sobrescribirlo con `--surface-width` y `--surface-height`). Usa `--calibration-debug` para ver el mapa de bordes si necesitas afinar parámetros. La vista se muestra espejada por defecto; agrega `--no-flip` si prefieres la perspectiva directa de la cámara.
-3. Cuando el contorno verde coincida con la superficie y aparezca “Surface detected”, presiona `s` para guardar `calibration/homography.npz`. Presiona `q` para salir sin guardar.
+    ```powershell
+    python src/neural_paint.py --camera 0 --calibration-only --calibration-warp
+    ```
 
-El archivo guardado contiene la homografía y los metadatos necesarios para mapear la posición de la mano al plano de dibujo.
+    - Ajusta `--camera` si usas otra entrada.
+    - El modo `--calibration-warp` muestra la superficie rectificada para verificar el encuadre.
+    - Agrega `--calibration-debug` para visualizar bordes útiles al ajustar luces.
+    - Al iniciar se solicitará el modo (contorno brillante o rejilla AprilTag). Puedes forzarlo con `--calibration-mode contour` o `--calibration-mode apriltag`.
+    - Guarda la homografía con `s`; cancela con `q`. El archivo se almacena en `calibration/homography.npz`.
 
-## Sesión interactiva de dibujo
+2. **Iniciar el modo de dibujo** una vez calibrado:
 
-1. Asegúrate de haber generado `calibration/homography.npz` (si no existe, el programa iniciará la calibración automáticamente).
-2. Ejecuta la aplicación principal (crea un overlay transparente encima de tu escritorio):
+    ```powershell
+    python src/neural_paint.py --camera 0
+    ```
 
-	```powershell
-	python src/neural_paint.py --camera 0
-	```
+    - Usa `--no-flip` si no deseas que la vista previa se muestre en espejo.
+    - Los parámetros `--min-detection`, `--min-tracking` y `--smoothing` te permiten afinar la estabilidad del puntero.
 
-	Ajusta `--camera` o los umbrales `--min-detection`, `--min-tracking` según tu hardware. Usa `--no-flip` si no deseas espejar el recuadro de cámara.
-3. Interfaz y gestos (mano derecha para apuntar, brazo izquierdo para comandos):
-	- La ventana principal muestra la superficie rectificada a pantalla completa y un recuadro con la cámara en la esquina superior izquierda.
-	- **Modo Dibujar**: brazo izquierdo horizontal (aprox. a la altura del hombro) con el antebrazo apuntando hacia arriba. El modo persiste hasta cambiar de gesto.
-	- **Modo Borrar**: brazo izquierdo horizontal con el antebrazo apuntando hacia abajo. El puntero rojo actúa como una goma selectiva y elimina solo los segmentos que atraviesa dentro del radio configurado (`--erase-radius`).
-	- **Limpiar todo**: brazo izquierdo completamente extendido hacia arriba. Borra todos los trazos y regresa a modo inactivo.
-	- **Selector de color**: brazo izquierdo totalmente extendido en horizontal (antebrazo alineado con el suelo). Aparece una rueda de 10 colores sobre la imagen de la cámara; coloca la mano derecha encima del color deseado y mantenla 3 s para aplicarlo al pincel.
-	- El puntero se apoya en la punta del índice derecho; si no se distingue, recurre a la muñeca.
-	- El recuadro de cámara resalta permanentemente el contorno de la superficie detectada para que sepas dónde impactarán los trazos sobre la pantalla real.
-	 - Repetir el gesto de dibujar o borrar tarda 3 s en devolver el sistema a modo inactivo para evitar cambios accidentales (ajustable con `--mode-toggle-delay`).
-4. Atajos de teclado: `q` salir, `c` limpiar el lienzo actual.
+3. **Gestos y controles principales** (mano derecha para apuntar, brazo izquierdo para comandos):
+    - **Modo dibujar**: brazo izquierdo horizontal con antebrazo apuntando arriba.
+    - **Modo borrar**: brazo izquierdo horizontal con antebrazo apuntando abajo (borrado selectivo dentro del radio `--erase-radius`).
+    - **Limpiar todo**: brazo izquierdo extendido verticalmente hacia arriba.
+    - **Selector de color**: brazo izquierdo horizontal y estable; aparecerá la rueda de colores. Mantén la mano derecha sobre un color 3 s para seleccionarlo.
+    - **Teclado**: `q` salir, `c` limpiar lienzo, `r` forzar reconocimiento OCR en la región del puntero.
+    - El gesto repetido para dibujar/borrar devuelve a modo inactivo tras el tiempo `--mode-toggle-delay` (por defecto 3 s).
 
-Parámetros adicionales útiles: `--command-hold-frames` (frames consecutivos necesarios para aceptar un gesto), `--erase-radius` (radio de borrado en píxeles), `--preview-scale` (tamaño relativo del recuadro de cámara), `--brush-thickness` (ancho del trazo en píxeles del lienzo lógico), `--mode-toggle-delay` (segundos mínimos antes de regresar a idle repitiendo un gesto) y `--surface-width/--surface-height` (solo si deseas forzar un lienzo distinto de la pantalla principal).
+4. **Opciones útiles del CLI** (se pueden combinar):
+    - `--surface-width` y `--surface-height`: fuerzan dimensiones lógicas del lienzo.
+    - `--preview-scale`: escala la ventana de cámara (0.05 a 0.5).
+    - `--command-hold-frames`: cuadros consecutivos para aceptar gestos (sube si hay falsos positivos).
+    - `--easyocr-cpu`: fuerza OCR en CPU; combinado con `--easyocr-models` para indicar la carpeta de modelos.
 
-El programa crea un overlay transparente encima de tu escritorio; cierra con `q` desde la consola.
+## Pipeline interno y componentes
+
+1. **Captura de cámara**: OpenCV obtiene cuadros BGR del dispositivo elegido y los convierte a RGB para MediaPipe Holistic.
+2. **Detección corporal**: MediaPipe proporciona landmarks de pose y manos. Se extrae la punta del índice derecho como puntero y el brazo izquierdo para clasificar gestos.
+3. **Calibración y proyección**: la homografía guardada convierte el puntero de coordenadas de cámara a coordenadas del lienzo virtual. Si no existe calibración, se lanza automáticamente el asistente (contorno brillante o AprilTags).
+4. **Suavizado y validación**: la posición del puntero se filtra con un suavizado exponencial (`--smoothing`) y se comprueba si cae dentro de la superficie.
+5. **Gestión de modos**: se interpretan los gestos (dibujar, borrar, limpiar, selector de color) mediante el clasificador de brazo. El modo determina si se agregan puntos a un trazo, se borra un área o se muestra la rueda de colores.
+6. **Lienzo y trazos**: `StrokeCanvas` conserva la lista de trazos, dibuja nuevas líneas y aplica borrado preciso mediante intersecciones segmento-círculo.
+7. **Overlay en pantalla completa**: con pywin32 se crea una ventana transparente que combina el lienzo, el puntero, mensajes de estado y una vista previa de cámara en la esquina superior izquierda.
+8. **Reconocimiento OCR opcional**: al presionar `r`, un segmento del lienzo se envía a EasyOCR en segundo plano. El resultado se clasifica entre texto o fórmula y se colorean los elementos detectados.
+9. **Retroalimentación visual**: la ventana de calibración y el overlay muestran mensajes en español, incluyendo instrucciones para guardar, estados de reconocimiento y recordatorios de atajos.
+
+Comprender este flujo ayuda a extender el proyecto: por ejemplo, puedes añadir nuevos gestos dentro del clasificador, introducir otros motores de reconocimiento sustituyendo el `RegionAnalyzer`, o cambiar la lógica de overlay reutilizando la homografía calculada.

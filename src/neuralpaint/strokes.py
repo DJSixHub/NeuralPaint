@@ -1,3 +1,4 @@
+# Gestión de trazos de dibujo y operaciones de borrado sobre un lienzo.
 from __future__ import annotations
 
 import math
@@ -8,12 +9,14 @@ import cv2
 import numpy as np
 
 
+# Stroke almacena color BGR y puntos enteros pertenecientes a un trazo.
 @dataclass
 class Stroke:
     color: Tuple[int, int, int]
     points: List[Tuple[int, int]]
 
 
+# StrokeCanvas gestiona trazos y renderiza el lienzo final.
 class StrokeCanvas:
     def __init__(
         self,
@@ -28,12 +31,15 @@ class StrokeCanvas:
         self.thickness = thickness
         self.strokes: List[Stroke] = []
 
+    # set_color actualiza el color BGR del pincel activo.
     def set_color(self, color: Tuple[int, int, int]) -> None:
         self.brush_color = color
 
+    # start_stroke inicia un nuevo trazo con un punto inicial.
     def start_stroke(self, point: Tuple[int, int]) -> None:
         self.strokes.append(Stroke(color=self.brush_color, points=[point]))
 
+    # add_point agrega un punto al trazo actual o inicia uno nuevo si no existe.
     def add_point(self, point: Tuple[int, int]) -> None:
         if not self.strokes:
             self.start_stroke(point)
@@ -43,6 +49,7 @@ class StrokeCanvas:
             return
         stroke.points.append(point)
 
+    # erase_at elimina secciones de trazos dentro de un círculo con centro y radio dados.
     def erase_at(self, point: Tuple[int, int], radius: float) -> None:
         if not self.strokes:
             return
@@ -105,9 +112,11 @@ class StrokeCanvas:
 
         self.strokes = remaining
 
+    # clear borra todos los trazos almacenados.
     def clear(self) -> None:
         self.strokes.clear()
 
+    # render devuelve una imagen BGR con los trazos dibujados.
     def render(self) -> np.ndarray:
         canvas = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         for stroke in self.strokes:
@@ -118,12 +127,14 @@ class StrokeCanvas:
                 cv2.line(canvas, p0, p1, stroke.color, self.thickness, cv2.LINE_AA)
         return canvas
 
+    # _point_inside_circle evalúa si un punto entero cae dentro del radio especificado.
     @staticmethod
     def _point_inside_circle(x: int, y: int, cx: int, cy: int, radius: float) -> bool:
         dx = x - cx
         dy = y - cy
         return dx * dx + dy * dy <= radius * radius
 
+    # _segment_circle_intersections calcula intersecciones entre un segmento y un círculo.
     @staticmethod
     def _segment_circle_intersections(
         p0: Tuple[int, int],

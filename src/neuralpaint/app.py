@@ -1,3 +1,4 @@
+# Bucle principal de la aplicación interactiva con gestos, overlay y OCR.
 from __future__ import annotations
 
 import ctypes
@@ -8,15 +9,16 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-try:  # Windows-only keyboard polling
+try:  # pragma: no cover - lectura de teclado específica de Windows
     import msvcrt  # type: ignore
-except ImportError:  # pragma: no cover - non-Windows fallback
+except ImportError:  # pragma: no cover - compatibilidad con sistemas sin Windows
     msvcrt = None
 
 from .calibration import CalibrationData
 from .color_picker import ColorPicker
 from .gestures import CommandType, InteractionMode, ArmGestureClassifier, classify_left_arm_command
 from .overlay import HAS_OVERLAY_SUPPORT, OverlayWindow, draw_status_banner
+from .recognition import RegionAnalyzer, RecognitionResult
 from .strokes import StrokeCanvas
 from .utils import (
     clamp_point,
@@ -26,6 +28,7 @@ from .utils import (
     surface_corners_in_camera,
 )
 
+# MODE_LABELS mapea cada modo de interacción a una etiqueta en pantalla.
 MODE_LABELS = {
     InteractionMode.IDLE: "INACTIVO",
     InteractionMode.DRAW: "DIBUJAR",
@@ -34,6 +37,7 @@ MODE_LABELS = {
 }
 
 
+# extract_pointer_position toma el resultado de MediaPipe y devuelve un punto (x, y) o None.
 def extract_pointer_position(
     holistic_result,
     frame_width: int,
@@ -53,16 +57,17 @@ def extract_pointer_position(
     return None
 
 
+# run_interactive_app recibe los argumentos CLI y la calibración y devuelve código de salida int.
 def run_interactive_app(args, calibration: CalibrationData) -> int:
     if not HAS_OVERLAY_SUPPORT:
         print(
-            "pywin32 is required for the overlay mode. Install it via 'pip install pywin32'.",
+            "pywin32 es obligatorio para el modo de superposición. Instálalo con 'pip install pywin32'.",
         )
         return 1
 
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
-        print(f"Failed to open camera index {args.camera}")
+        print(f"No se pudo abrir la cámara con índice {args.camera}")
         return 1
 
     holistic = mp.solutions.holistic.Holistic(
@@ -78,6 +83,12 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
         thickness=max(1, int(args.brush_thickness)),
     )
     color_picker = ColorPicker()
+    recognizer = RegionAnalyzer(model_dir=args.easyocr_models, use_gpu=args.easyocr_gpu)
+    active_recognition: Optional[RecognitionResult] = None
+    recognition_display_until = 0.0
+    last_recognition_request = 0.0
+    recognition_cooldown = 1.5
+    recognition_display_duration = 8.0
 
     prev_pointer: Optional[Tuple[float, float]] = None
     drawing_active = False
@@ -97,11 +108,48 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
     preview_scale = float(np.clip(args.preview_scale, 0.05, 0.5))
     surface_polygon_cam: Optional[np.ndarray] = None
 
+    surface_dimensions = (
+        int(calibration.surface_width),
+        int(calibration.surface_height),
+    )
+
+    # extract_surface_roi devuelve un recorte del lienzo alrededor del centro dado o None.
+    def extract_surface_roi(surface_img: np.ndarray, center: Tuple[int, int]) -> Optional[Tuple[np.ndarray, Tuple[int, int]]]:
+
+        roi_width = min(420, surface_dimensions[0])
+        roi_height = min(280, surface_dimensions[1])
+        half_w = roi_width // 2
+        half_h = roi_height // 2
+        cx, cy = int(center[0]), int(center[1])
+        x0 = int(np.clip(cx - half_w, 0, max(0, surface_dimensions[0] - roi_width)))
+        y0 = int(np.clip(cy - half_h, 0, max(0, surface_dimensions[1] - roi_height)))
+        x1 = x0 + roi_width
+        y1 = y0 + roi_height
+        patch = surface_img[y0:y1, x0:x1]
+        if patch.size == 0:
+            return None
+        return patch, (x0, y0)
+
+    # try_request_recognition lanza OCR asincrónico si el puntero está dentro de la superficie.
+    def try_request_recognition(surface_img: np.ndarray, center: Optional[Tuple[int, int]]) -> bool:
+        nonlocal last_recognition_request
+        if center is None or recognizer.busy:
+            return False
+        if time.perf_counter() - last_recognition_request < recognition_cooldown:
+            return False
+        roi = extract_surface_roi(surface_img, center)
+        if roi is None:
+            return False
+        patch, origin = roi
+        recognizer.submit(patch, origin)
+        last_recognition_request = time.perf_counter()
+        return True
+
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
-                print("Camera frame grab failed")
+                print("Fallo al capturar un cuadro de la cámara")
                 break
 
             frame_height, frame_width = frame.shape[:2]
@@ -111,6 +159,7 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                     calibration.surface_width,
                     calibration.surface_height,
                 )
+            surface_view = cv2.warpPerspective(frame, calibration.homography, surface_dimensions)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             result = holistic.process(rgb)
 
@@ -119,6 +168,14 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                     frame,
                     result.pose_landmarks,
                     mp.solutions.holistic.POSE_CONNECTIONS,
+                )
+            if result.left_hand_landmarks:
+                mp.solutions.drawing_utils.draw_landmarks(
+                    frame,
+                    result.left_hand_landmarks,
+                    mp.solutions.holistic.HAND_CONNECTIONS,
+                    mp.solutions.drawing_styles.get_default_hand_landmarks_style(),
+                    mp.solutions.drawing_styles.get_default_hand_connections_style(),
                 )
             if result.right_hand_landmarks:
                 mp.solutions.drawing_utils.draw_landmarks(
@@ -243,15 +300,18 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             overlay_frame[..., :3] = overlay_rgb
             overlay_frame[..., 3] = np.where(mask > 10, 200, 0)
 
+            overlay_color = overlay_frame[..., :3].copy()
+            overlay_alpha = overlay_frame[..., 3].copy()
+
+            recognition_result = recognizer.poll_result()
+            if recognition_result is not None:
+                active_recognition = recognition_result
+                recognition_display_until = time.perf_counter() + recognition_display_duration
+            display_now = time.perf_counter()
+
             if pointer_screen_point is not None:
-                cv2.circle(
-                    overlay_frame,
-                    pointer_screen_point,
-                    14,
-                    (*pointer_color, 255),
-                    -1,
-                    cv2.LINE_AA,
-                )
+                cv2.circle(overlay_color, pointer_screen_point, 14, pointer_color, -1, cv2.LINE_AA)
+                cv2.circle(overlay_alpha, pointer_screen_point, 14, 255, -1, cv2.LINE_AA)
 
             preview_height = int(screen_height * preview_scale)
             preview_width = int(screen_width * preview_scale)
@@ -272,26 +332,41 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                     color_picker.draw(preview_image, pointer_preview_point)
 
                 preview_resized = cv2.resize(preview_image, (preview_width, preview_height))
-                preview_patch = np.zeros((preview_height, preview_width, 4), dtype=np.uint8)
-                preview_patch[..., :3] = preview_resized
-                preview_patch[..., 3] = 230
-                y_end = min(10 + preview_height, screen_height)
-                x_end = min(10 + preview_width, screen_width)
-                overlay_frame[10:y_end, 10:x_end] = preview_patch[: y_end - 10, : x_end - 10]
+                y0 = 10
+                x0 = 10
+                y_end = min(y0 + preview_height, screen_height)
+                x_end = min(x0 + preview_width, screen_width)
+                patch_height = y_end - y0
+                patch_width = x_end - x0
+                if patch_height > 0 and patch_width > 0:
+                    overlay_color[y0:y_end, x0:x_end] = preview_resized[:patch_height, :patch_width]
+                    alpha_patch = np.full((patch_height, patch_width), 230, dtype=np.uint8)
+                    existing_alpha = overlay_alpha[y0:y_end, x0:x_end]
+                    np.maximum(existing_alpha, alpha_patch, out=existing_alpha)
+
+
+            overlay_frame[..., :3] = overlay_color
+            overlay_frame[..., 3] = overlay_alpha
 
             mode_label = MODE_LABELS.get(interaction_mode, interaction_mode.name)
             status_lines = [
                 f"MODO: {mode_label}",
                 "Brazo izquierdo -> horiz+arriba dibuja | horiz+abajo borra | arriba limpia | horiz mantiene color",
-                "Teclas: q salir | c limpiar",
+                "Teclas: q salir | c limpiar | r analizar región",
             ]
+            if recognizer.busy:
+                status_lines.append("Analizando... mantén el puntero quieto")
+            elif active_recognition is not None and display_now <= recognition_display_until and active_recognition.has_items:
+                status_lines.append(f"Recon: {active_recognition.kind.upper()} ({len(active_recognition.items)} elementos)")
+            elif active_recognition is not None and active_recognition.error:
+                status_lines.append("Recon: error, revisa la consola")
             draw_status_banner(overlay_frame, status_lines)
 
             overlay.update(np.ascontiguousarray(overlay_frame))
             overlay.pump_messages()
 
             key_pressed = None
-            if msvcrt and msvcrt.kbhit():  # pragma: no branch - Windows keyboard polling
+            if msvcrt and msvcrt.kbhit():  # pragma: no branch - lectura de teclado Windows
                 key_pressed = msvcrt.getwch().lower()
             if key_pressed == "q":
                 break
@@ -300,10 +375,14 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 prev_pointer = None
                 interaction_mode = InteractionMode.IDLE
                 drawing_active = False
+            if key_pressed == "r":
+                try_request_recognition(surface_view, pointer_surface_point)
+                continue
 
     finally:
         cap.release()
         holistic.close()
         overlay.close()
+        recognizer.close()
 
     return 0

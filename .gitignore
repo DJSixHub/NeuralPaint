@@ -16,3 +16,4 @@ models/
 Reconocimiento de Caracteres/assets/fonts/
 *.woff2
 *.woff
+*.pt

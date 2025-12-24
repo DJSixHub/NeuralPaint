@@ -19,6 +19,7 @@ from .color_picker import ColorPicker
 from .gestures import CommandType, InteractionMode, ArmGestureClassifier, classify_left_arm_command
 from .overlay import HAS_OVERLAY_SUPPORT, OverlayWindow, draw_status_banner
 from .recognition import RegionAnalyzer, RecognitionResult
+from .segmentation import RegionSelector, Segmenter
 from .strokes import StrokeCanvas
 from .utils import (
     clamp_point,
@@ -34,6 +35,7 @@ MODE_LABELS = {
     InteractionMode.DRAW: "DIBUJAR",
     InteractionMode.ERASE: "BORRAR",
     InteractionMode.COLOR_SELECT: "COLORES",
+    InteractionMode.REGION_SELECT: "SELECCION",
 }
 
 
@@ -84,6 +86,20 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
     )
     color_picker = ColorPicker()
     recognizer = RegionAnalyzer(model_dir=args.easyocr_models, use_gpu=args.easyocr_gpu)
+    # segmentation selector + segmenter using models/checkpoint_epoch_70.pth
+    region_selector = RegionSelector(hold_time=3.0, move_threshold=8.0)
+    segmenter = Segmenter()
+    # selection handshake state (two fists define rect corners)
+    selection_points: list[Tuple[int, int]] = []
+    first_fist_hand: Optional[str] = None
+    last_left_fist = False
+    last_right_fist = False
+    # index-up previous state for rising-edge confirmation
+    prev_index_up_right = False
+    prev_index_up_left = False
+    # applied masks produced by segmenter to apply to overlay and persist until CLEAR_ALL
+    applied_masks: list[Tuple[int, int, np.ndarray]] = []
+    gesture_hand: Optional[str] = None  # 'left' or 'right' when index-up gesture is detected
     active_recognition: Optional[RecognitionResult] = None
     recognition_display_until = 0.0
     last_recognition_request = 0.0
@@ -187,6 +203,21 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 )
 
             raw_command = classify_left_arm_command(result.pose_landmarks)
+            # detectar índice arriba y registrar qué mano lo hizo (preferir derecha)
+            try:
+                from .gestures import both_index_fingers_up
+
+                # activar REGION_SELECT sólo cuando ambos índices estén arriba simultáneamente
+                if both_index_fingers_up(
+                    getattr(result, "left_hand_landmarks", None),
+                    getattr(result, "right_hand_landmarks", None),
+                ):
+                    interaction_mode = InteractionMode.REGION_SELECT
+                    gesture_hand = "both"
+                    drawing_active = False
+            except Exception:
+                pass
+
             command = command_classifier.update(raw_command)
 
             now = time.perf_counter()
@@ -195,6 +226,15 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 drawing_active = False
                 if not color_picker.active:
                     interaction_mode = InteractionMode.IDLE
+                    # clear any applied segmentation masks on clear-all gesture
+                    try:
+                        applied_masks = []
+                    except Exception:
+                        pass
+            elif command == CommandType.REGION_SELECT:
+                # entrada al modo selección de región por gesto: pasa a REGION_SELECT
+                interaction_mode = InteractionMode.REGION_SELECT
+                drawing_active = False
             elif command == CommandType.COLOR_PICKER and not color_picker.active:
                 color_picker.activate(frame.shape)
                 last_mode_before_picker = interaction_mode if interaction_mode != InteractionMode.COLOR_SELECT else InteractionMode.DRAW
@@ -218,6 +258,17 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                         mode_activated_at[InteractionMode.ERASE] = now
                     drawing_active = False
 
+            # compute per-hand index tip positions (frame coords)
+            def hand_index_frame_point(hand_landmarks) -> Optional[Tuple[float, float]]:
+                if hand_landmarks is None:
+                    return None
+                lm = hand_landmarks.landmark[mp.solutions.hands.HandLandmark.INDEX_FINGER_TIP]
+                return (lm.x * frame_width, lm.y * frame_height)
+
+            pointer_cam_right = hand_index_frame_point(getattr(result, "right_hand_landmarks", None))
+            pointer_cam_left = hand_index_frame_point(getattr(result, "left_hand_landmarks", None))
+
+            # fallback pointer (wrist/right precedence) for legacy behaviour
             pointer_cam: Optional[Tuple[float, float]] = extract_pointer_position(
                 result,
                 frame_width,
@@ -257,6 +308,18 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                         int(np.clip(pointer_surface_point[1] * scale_y, 0, screen_height - 1)),
                     )
 
+            # also compute surface-space pointers per hand when their index is visible
+            pointer_surface_right = None
+            pointer_surface_left = None
+            if pointer_cam_right is not None:
+                psr = project_point(calibration.homography, pointer_cam_right)
+                if is_inside_surface(psr, calibration.surface_width, calibration.surface_height):
+                    pointer_surface_right = clamp_point(psr, calibration.surface_width, calibration.surface_height)
+            if pointer_cam_left is not None:
+                psl = project_point(calibration.homography, pointer_cam_left)
+                if is_inside_surface(psl, calibration.surface_width, calibration.surface_height):
+                    pointer_surface_left = clamp_point(psl, calibration.surface_width, calibration.surface_height)
+
             if color_picker.active:
                 selected_color = color_picker.update(pointer_preview_point)
                 if selected_color is not None:
@@ -274,12 +337,104 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             elif interaction_mode == InteractionMode.COLOR_SELECT:
                 pointer_color = (255, 255, 255)
 
+            # Only draw in DRAW mode. REGION_SELECT must not create strokes.
             if interaction_mode == InteractionMode.DRAW and pointer_surface_point is not None and not color_picker.active:
                 if not drawing_active:
                     drawing_active = True
                     stroke_canvas.start_stroke(pointer_surface_point)
                 else:
                     stroke_canvas.add_point(pointer_surface_point)
+
+            # REGION_SELECT: handshake processed separately (fist anchor + moving index confirmation)
+            if interaction_mode == InteractionMode.REGION_SELECT:
+                try:
+                    from .gestures import is_hand_fist, is_index_finger_up
+
+                    left_fist = is_hand_fist(getattr(result, "left_hand_landmarks", None))
+                    right_fist = is_hand_fist(getattr(result, "right_hand_landmarks", None))
+
+                    # rising edge detection for fists
+                    left_event = left_fist and not last_left_fist
+                    right_event = right_fist and not last_right_fist
+                    last_left_fist = left_fist
+                    last_right_fist = right_fist
+
+                    # on first fist event, record anchor (where fist occurred)
+                    if (left_event or right_event) and not selection_points:
+                        if left_event and pointer_surface_left is not None:
+                            selection_points.append((int(pointer_surface_left[0]), int(pointer_surface_left[1])))
+                            first_fist_hand = "left"
+                        elif right_event and pointer_surface_right is not None:
+                            selection_points.append((int(pointer_surface_right[0]), int(pointer_surface_right[1])))
+                            first_fist_hand = "right"
+
+                    # candidate pointer is the index of the opposite hand when available
+                    if first_fist_hand == "left":
+                        candidate_ptr = pointer_surface_right
+                        moving_hand = "right"
+                    elif first_fist_hand == "right":
+                        candidate_ptr = pointer_surface_left
+                        moving_hand = "left"
+                    else:
+                        candidate_ptr = pointer_surface_point
+                        moving_hand = None
+
+                    # detect index-up rising edge on both hands
+                    idx_up_right = False
+                    idx_up_left = False
+                    try:
+                        idx_up_right = is_index_finger_up(getattr(result, "right_hand_landmarks", None))
+                        idx_up_left = is_index_finger_up(getattr(result, "left_hand_landmarks", None))
+                    except Exception:
+                        pass
+
+                    # confirmation must be the index-up of the SAME hand that performed the first fist
+                    confirm = False
+                    if first_fist_hand == "right" and idx_up_right and not prev_index_up_right:
+                        confirm = True
+                    if first_fist_hand == "left" and idx_up_left and not prev_index_up_left:
+                        confirm = True
+
+                    prev_index_up_right = idx_up_right
+                    prev_index_up_left = idx_up_left
+
+                    rect = None
+                    if confirm and selection_points and candidate_ptr is not None:
+                        p0 = selection_points[0]
+                        p1 = (int(candidate_ptr[0]), int(candidate_ptr[1]))
+                        lx, rx = sorted((int(p0[0]), int(p1[0])))
+                        ty, by = sorted((int(p0[1]), int(p1[1])))
+                        w = max(1, rx - lx)
+                        h = max(1, by - ty)
+                        rect = (lx, ty, w, h)
+                        # we will capture screen patch and run segmenter, then store applied mask
+                except Exception:
+                    rect = None
+                if rect is not None:
+                    # rect is (x,y,w,h) in surface coords -> convert to screen coords
+                    sx = int(rect[0] * scale_x)
+                    sy = int(rect[1] * scale_y)
+                    sw = int(rect[2] * scale_x)
+                    sh = int(rect[3] * scale_y)
+                    sx = max(0, min(sx, screen_width - 1))
+                    sy = max(0, min(sy, screen_height - 1))
+                    sw = max(1, min(sw, screen_width - sx))
+                    sh = max(1, min(sh, screen_height - sy))
+                    patch = overlay.capture_region(sx, sy, sw, sh)
+                    if patch.size != 0:
+                        mask = segmenter.run_on_patch(patch)
+                        if mask is not None and mask.size != 0:
+                            # store mask to apply persistently
+                            applied_masks.append((sx, sy, mask))
+                    try:
+                        stroke_canvas.strokes.pop()
+                    except Exception:
+                        pass
+                    interaction_mode = InteractionMode.IDLE
+                    selection_points = []
+                    first_fist_hand = None
+                    last_left_fist = False
+                    last_right_fist = False
             elif interaction_mode == InteractionMode.ERASE and pointer_surface_point is not None:
                 stroke_canvas.erase_at(pointer_surface_point, args.erase_radius)
                 drawing_active = False
@@ -294,6 +449,25 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             if pointer_surface_point is not None and not color_picker.active:
                 cv2.circle(canvas_display, pointer_surface_point, 10, pointer_color, -1, cv2.LINE_AA)
 
+            # draw selection preview rectangle (white) if in REGION_SELECT
+            try:
+                if interaction_mode == InteractionMode.REGION_SELECT:
+                    if len(selection_points) >= 1:
+                        a = selection_points[0]
+                        # candidate = opposite hand pointer when first fist recorded
+                        if first_fist_hand == "left":
+                            candidate = pointer_surface_right
+                        elif first_fist_hand == "right":
+                            candidate = pointer_surface_left
+                        else:
+                            candidate = pointer_surface_point
+                        if candidate is not None:
+                            ax, ay = int(a[0]), int(a[1])
+                            cx, cy = int(candidate[0]), int(candidate[1])
+                            cv2.rectangle(canvas_display, (ax, ay), (cx, cy), (255, 255, 255), 2, cv2.LINE_AA)
+            except Exception:
+                pass
+
             overlay_rgb = cv2.resize(canvas_display, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
             overlay_frame = np.zeros((screen_height, screen_width, 4), dtype=np.uint8)
             mask = cv2.cvtColor(overlay_rgb, cv2.COLOR_BGR2GRAY)
@@ -302,6 +476,35 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
 
             overlay_color = overlay_frame[..., :3].copy()
             overlay_alpha = overlay_frame[..., 3].copy()
+
+            # apply any applied masks produced by the segmenter (persistent)
+            if applied_masks:
+                try:
+                    for (mx, my, mmask) in applied_masks:
+                        mh, mw = mmask.shape[:2]
+                        x0 = mx
+                        y0 = my
+                        x1 = min(screen_width, x0 + mw)
+                        y1 = min(screen_height, y0 + mh)
+                        if x1 <= x0 or y1 <= y0:
+                            continue
+                        sub_w = x1 - x0
+                        sub_h = y1 - y0
+                        mask_crop = mmask[0:sub_h, 0:sub_w]
+                        m = (mask_crop > 0)
+                        try:
+                            patch_rgb = overlay_color[y0:y1, x0:x1]
+                            patch_rgb[m] = (255, 255, 255)
+                            overlay_color[y0:y1, x0:x1] = patch_rgb
+                            a_patch = overlay_alpha[y0:y1, x0:x1]
+                            a_patch[m] = 230
+                            overlay_alpha[y0:y1, x0:x1] = a_patch
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            
 
             recognition_result = recognizer.poll_result()
             if recognition_result is not None:
@@ -354,6 +557,14 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 "Brazo izquierdo -> horiz+arriba dibuja | horiz+abajo borra | arriba limpia | horiz mantiene color",
                 "Teclas: q salir | c limpiar | r analizar región",
             ]
+            # show which hand is used for gesture/selection when in region mode
+            if interaction_mode == InteractionMode.REGION_SELECT:
+                if gesture_hand == "right":
+                    status_lines.insert(1, "Seleccion: gesto en mano DERECHA; usa IZQUIERDA para definir rect.")
+                elif gesture_hand == "left":
+                    status_lines.insert(1, "Seleccion: gesto en mano IZQUIERDA; usa DERECHA para definir rect.")
+                else:
+                    status_lines.insert(1, "Seleccion: gesto detectado; usa otra mano para definir rect.")
             if recognizer.busy:
                 status_lines.append("Analizando... mantén el puntero quieto")
             elif active_recognition is not None and display_now <= recognition_display_until and active_recognition.has_items:
@@ -374,6 +585,11 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 stroke_canvas.clear()
                 prev_pointer = None
                 interaction_mode = InteractionMode.IDLE
+                # clear applied masks on manual clear
+                try:
+                    applied_masks = []
+                except Exception:
+                    pass
                 drawing_active = False
             if key_pressed == "r":
                 try_request_recognition(surface_view, pointer_surface_point)

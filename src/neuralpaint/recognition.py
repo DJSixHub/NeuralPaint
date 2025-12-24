@@ -362,3 +362,6 @@ class RegionAnalyzer:
         if re.fullmatch(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", stripped):
             return "variable"
         return "text"
+
+
+# Note: segmentation/Model invocation moved to src/neuralpaint/segmentation.py

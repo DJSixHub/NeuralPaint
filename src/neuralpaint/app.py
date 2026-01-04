@@ -2,32 +2,33 @@
 from __future__ import annotations
 
 import ctypes
+import importlib
 import time
 from typing import Optional, Tuple
 
 import cv2
 import mediapipe as mp
 import numpy as np
+import os
 
-try:  # pragma: no cover - lectura de teclado específica de Windows
-    import msvcrt  # type: ignore
-except ImportError:  # pragma: no cover - compatibilidad con sistemas sin Windows
-    msvcrt = None
+msvcrt = importlib.import_module("msvcrt") if importlib.util.find_spec("msvcrt") else None
 
 from .calibration import CalibrationData
 from .color_picker import ColorPicker
-from .gestures import CommandType, InteractionMode, ArmGestureClassifier, classify_left_arm_command
+from .gestures import (
+    ArmGestureClassifier,
+    CommandType,
+    InteractionMode,
+    SelectionGestureTracker,
+    both_index_fingers_up,
+    classify_left_arm_command,
+    extract_pointer_position,
+    hand_index_point,
+)
 from .overlay import HAS_OVERLAY_SUPPORT, OverlayWindow, draw_status_banner
 from .recognition import RegionAnalyzer, RecognitionResult
-from .segmentation import RegionSelector, Segmenter
+from .segmentation import Segmenter
 from .strokes import StrokeCanvas
-from .utils import (
-    clamp_point,
-    exponential_smooth,
-    is_inside_surface,
-    project_point,
-    surface_corners_in_camera,
-)
 
 # MODE_LABELS mapea cada modo de interacción a una etiqueta en pantalla.
 MODE_LABELS = {
@@ -39,24 +40,46 @@ MODE_LABELS = {
 }
 
 
-# extract_pointer_position toma el resultado de MediaPipe y devuelve un punto (x, y) o None.
-def extract_pointer_position(
-    holistic_result,
-    frame_width: int,
-    frame_height: int,
-    min_visibility: float = 0.4,
-) -> Optional[Tuple[float, float]]:
-    right_hand = holistic_result.right_hand_landmarks
-    if right_hand:
-        index_tip = right_hand.landmark[8]
-        return index_tip.x * frame_width, index_tip.y * frame_height
+# geom helpers (previously in utils.py)
+def clamp_point(point: Tuple[float, float], width: int, height: int) -> Tuple[int, int]:
+    x = int(np.clip(point[0], 0, width - 1))
+    y = int(np.clip(point[1], 0, height - 1))
+    return x, y
 
-    pose_landmarks = holistic_result.pose_landmarks
-    if pose_landmarks:
-        wrist = pose_landmarks.landmark[mp.solutions.pose.PoseLandmark.RIGHT_WRIST]
-        if wrist.visibility >= min_visibility:
-            return wrist.x * frame_width, wrist.y * frame_height
-    return None
+
+def is_inside_surface(point: Tuple[float, float], width: int, height: int) -> bool:
+    x, y = point
+    return 0 <= x < width and 0 <= y < height
+
+
+def project_point(homography: np.ndarray, xy: Tuple[float, float]) -> Tuple[float, float]:
+    pts = np.array([[xy]], dtype=np.float32)
+    warped = cv2.perspectiveTransform(pts, homography)
+    return float(warped[0, 0, 0]), float(warped[0, 0, 1])
+
+
+def exponential_smooth(current: Tuple[float, float], previous: Optional[Tuple[float, float]], alpha: float) -> Tuple[float, float]:
+    if previous is None:
+        return current
+    alpha = float(np.clip(alpha, 0.0, 0.99))
+    return (
+        alpha * current[0] + (1 - alpha) * previous[0],
+        alpha * current[1] + (1 - alpha) * previous[1],
+    )
+
+
+def surface_corners_in_camera(inverse_homography: np.ndarray, width: float, height: float) -> np.ndarray:
+    corners = np.array(
+        [
+            [0.0, 0.0],
+            [width, 0.0],
+            [width, height],
+            [0.0, height],
+        ],
+        dtype=np.float32,
+    ).reshape(-1, 1, 2)
+    camera_points = cv2.perspectiveTransform(corners, inverse_homography.astype(np.float32))
+    return camera_points.reshape(-1, 2)
 
 
 # run_interactive_app recibe los argumentos CLI y la calibración y devuelve código de salida int.
@@ -66,6 +89,11 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             "pywin32 es obligatorio para el modo de superposición. Instálalo con 'pip install pywin32'.",
         )
         return 1
+
+    # Ensure Win32 screen coordinates match actual pixels (prevents capture offset on DPI-scaled displays).
+    # Must happen before creating any windows.
+    if hasattr(ctypes.windll, "user32") and hasattr(ctypes.windll.user32, "SetProcessDPIAware"):
+        ctypes.windll.user32.SetProcessDPIAware()
 
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
@@ -87,19 +115,10 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
     color_picker = ColorPicker()
     recognizer = RegionAnalyzer(model_dir=args.easyocr_models, use_gpu=args.easyocr_gpu)
     # segmentation selector + segmenter using models/checkpoint_epoch_70.pth
-    region_selector = RegionSelector(hold_time=3.0, move_threshold=8.0)
     segmenter = Segmenter()
-    # selection handshake state (two fists define rect corners)
-    selection_points: list[Tuple[int, int]] = []
-    first_fist_hand: Optional[str] = None
-    last_left_fist = False
-    last_right_fist = False
-    # index-up previous state for rising-edge confirmation
-    prev_index_up_right = False
-    prev_index_up_left = False
-    # applied masks produced by segmenter to apply to overlay and persist until CLEAR_ALL
-    applied_masks: list[Tuple[int, int, np.ndarray]] = []
-    gesture_hand: Optional[str] = None  # 'left' or 'right' when index-up gesture is detected
+    selection_tracker = SelectionGestureTracker()
+    # applied masks produced by segmenter, stored in screen coords (sx, sy, w, h, produced_path, mask)
+    applied_masks = []
     active_recognition: Optional[RecognitionResult] = None
     recognition_display_until = 0.0
     last_recognition_request = 0.0
@@ -161,6 +180,8 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
         last_recognition_request = time.perf_counter()
         return True
 
+    both_index_prev = False
+
     try:
         while True:
             ret, frame = cap.read()
@@ -203,22 +224,29 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 )
 
             raw_command = classify_left_arm_command(result.pose_landmarks)
-            # detectar índice arriba y registrar qué mano lo hizo (preferir derecha)
-            try:
-                from .gestures import both_index_fingers_up
+            left_hand = getattr(result, "left_hand_landmarks", None)
+            right_hand = getattr(result, "right_hand_landmarks", None)
 
-                # activar REGION_SELECT sólo cuando ambos índices estén arriba simultáneamente
-                if both_index_fingers_up(
-                    getattr(result, "left_hand_landmarks", None),
-                    getattr(result, "right_hand_landmarks", None),
-                ):
-                    interaction_mode = InteractionMode.REGION_SELECT
-                    gesture_hand = "both"
-                    drawing_active = False
-            except Exception:
-                pass
+            # Enter REGION_SELECT on the *rising edge* of both-index-up, BUT only if we're not
+            # already in REGION_SELECT mode. Once in the mode, stay there until explicitly exited.
+            # This prevents repeated resets while the user keeps both indexes up during selection.
+            both_now = both_index_fingers_up(left_hand, right_hand)
+            if both_now and not both_index_prev and interaction_mode != InteractionMode.REGION_SELECT:
+                selection_tracker.reset()
+                command_classifier.reset()
+                interaction_mode = InteractionMode.REGION_SELECT
+                drawing_active = False
+                print("[REGION] enter REGION_SELECT (both index edge)")
+            both_index_prev = both_now
 
+            # Process arm commands - they work in all modes including REGION_SELECT.
+            # However, while a selection is actively in progress (anchor already set),
+            # ignore mode-toggle commands to avoid noisy arm classification interrupting
+            # the selection flow. CLEAR_ALL must still work at all times.
             command = command_classifier.update(raw_command)
+            if interaction_mode == InteractionMode.REGION_SELECT and selection_tracker.anchor is not None:
+                if command != CommandType.CLEAR_ALL:
+                    command = None
 
             now = time.perf_counter()
             if command == CommandType.CLEAR_ALL:
@@ -231,8 +259,12 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                         applied_masks = []
                     except Exception:
                         pass
+                selection_tracker.reset()
+                command_classifier.reset()
             elif command == CommandType.REGION_SELECT:
                 # entrada al modo selección de región por gesto: pasa a REGION_SELECT
+                selection_tracker.reset()
+                command_classifier.reset()
                 interaction_mode = InteractionMode.REGION_SELECT
                 drawing_active = False
             elif command == CommandType.COLOR_PICKER and not color_picker.active:
@@ -259,14 +291,8 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                     drawing_active = False
 
             # compute per-hand index tip positions (frame coords)
-            def hand_index_frame_point(hand_landmarks) -> Optional[Tuple[float, float]]:
-                if hand_landmarks is None:
-                    return None
-                lm = hand_landmarks.landmark[mp.solutions.hands.HandLandmark.INDEX_FINGER_TIP]
-                return (lm.x * frame_width, lm.y * frame_height)
-
-            pointer_cam_right = hand_index_frame_point(getattr(result, "right_hand_landmarks", None))
-            pointer_cam_left = hand_index_frame_point(getattr(result, "left_hand_landmarks", None))
+            pointer_cam_right = hand_index_point(right_hand, frame_width, frame_height)
+            pointer_cam_left = hand_index_point(left_hand, frame_width, frame_height)
 
             # fallback pointer (wrist/right precedence) for legacy behaviour
             pointer_cam: Optional[Tuple[float, float]] = extract_pointer_position(
@@ -338,107 +364,83 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 pointer_color = (255, 255, 255)
 
             # Only draw in DRAW mode. REGION_SELECT must not create strokes.
-            if interaction_mode == InteractionMode.DRAW and pointer_surface_point is not None and not color_picker.active:
-                if not drawing_active:
-                    drawing_active = True
-                    stroke_canvas.start_stroke(pointer_surface_point)
-                else:
-                    stroke_canvas.add_point(pointer_surface_point)
-
-            # REGION_SELECT: handshake processed separately (fist anchor + moving index confirmation)
-            if interaction_mode == InteractionMode.REGION_SELECT:
-                try:
-                    from .gestures import is_hand_fist, is_index_finger_up
-
-                    left_fist = is_hand_fist(getattr(result, "left_hand_landmarks", None))
-                    right_fist = is_hand_fist(getattr(result, "right_hand_landmarks", None))
-
-                    # rising edge detection for fists
-                    left_event = left_fist and not last_left_fist
-                    right_event = right_fist and not last_right_fist
-                    last_left_fist = left_fist
-                    last_right_fist = right_fist
-
-                    # on first fist event, record anchor (where fist occurred)
-                    if (left_event or right_event) and not selection_points:
-                        if left_event and pointer_surface_left is not None:
-                            selection_points.append((int(pointer_surface_left[0]), int(pointer_surface_left[1])))
-                            first_fist_hand = "left"
-                        elif right_event and pointer_surface_right is not None:
-                            selection_points.append((int(pointer_surface_right[0]), int(pointer_surface_right[1])))
-                            first_fist_hand = "right"
-
-                    # candidate pointer is the index of the opposite hand when available
-                    if first_fist_hand == "left":
-                        candidate_ptr = pointer_surface_right
-                        moving_hand = "right"
-                    elif first_fist_hand == "right":
-                        candidate_ptr = pointer_surface_left
-                        moving_hand = "left"
+            # Important: don't break a stroke just because the pointer disappears for a frame.
+            if interaction_mode == InteractionMode.DRAW and not color_picker.active:
+                if pointer_surface_point is not None:
+                    if not drawing_active:
+                        drawing_active = True
+                        stroke_canvas.start_stroke(pointer_surface_point)
                     else:
-                        candidate_ptr = pointer_surface_point
-                        moving_hand = None
+                        stroke_canvas.add_point(pointer_surface_point)
 
-                    # detect index-up rising edge on both hands
-                    idx_up_right = False
-                    idx_up_left = False
-                    try:
-                        idx_up_right = is_index_finger_up(getattr(result, "right_hand_landmarks", None))
-                        idx_up_left = is_index_finger_up(getattr(result, "left_hand_landmarks", None))
-                    except Exception:
-                        pass
+            # REGION_SELECT: fist to anchor + index up to confirm selection rect
+            if interaction_mode == InteractionMode.REGION_SELECT:
+                rect = selection_tracker.update(
+                    left_hand,
+                    right_hand,
+                    pointer_surface_point,
+                    pointer_surface_left,
+                    pointer_surface_right,
+                )
 
-                    # confirmation must be the index-up of the SAME hand that performed the first fist
-                    confirm = False
-                    if first_fist_hand == "right" and idx_up_right and not prev_index_up_right:
-                        confirm = True
-                    if first_fist_hand == "left" and idx_up_left and not prev_index_up_left:
-                        confirm = True
-
-                    prev_index_up_right = idx_up_right
-                    prev_index_up_left = idx_up_left
-
-                    rect = None
-                    if confirm and selection_points and candidate_ptr is not None:
-                        p0 = selection_points[0]
-                        p1 = (int(candidate_ptr[0]), int(candidate_ptr[1]))
-                        lx, rx = sorted((int(p0[0]), int(p1[0])))
-                        ty, by = sorted((int(p0[1]), int(p1[1])))
-                        w = max(1, rx - lx)
-                        h = max(1, by - ty)
-                        rect = (lx, ty, w, h)
-                        # we will capture screen patch and run segmenter, then store applied mask
-                except Exception:
-                    rect = None
                 if rect is not None:
-                    # rect is (x,y,w,h) in surface coords -> convert to screen coords
-                    sx = int(rect[0] * scale_x)
-                    sy = int(rect[1] * scale_y)
-                    sw = int(rect[2] * scale_x)
-                    sh = int(rect[3] * scale_y)
-                    sx = max(0, min(sx, screen_width - 1))
-                    sy = max(0, min(sy, screen_height - 1))
-                    sw = max(1, min(sw, screen_width - sx))
-                    sh = max(1, min(sh, screen_height - sy))
-                    patch = overlay.capture_region(sx, sy, sw, sh)
-                    if patch.size != 0:
-                        mask = segmenter.run_on_patch(patch)
+                    lx, ty, w, h = rect
+                    lx = max(0, min(lx, int(calibration.surface_width) - 1))
+                    ty = max(0, min(ty, int(calibration.surface_height) - 1))
+                    w = max(1, min(w, int(calibration.surface_width) - lx))
+                    h = max(1, min(h, int(calibration.surface_height) - ty))
+
+                    # compute exact screen coordinates from surface coordinates
+                    sx = int(lx * scale_x)
+                    sy = int(ty * scale_y)
+                    sw = max(1, int(w * scale_x))
+                    sh = max(1, int(h * scale_y))
+
+                    # clamp screen coords to valid screen bounds
+                    sx = max(0, min(sx, screen_width - sw))
+                    sy = max(0, min(sy, screen_height - sh))
+                    sw = min(sw, screen_width - sx)
+                    sh = min(sh, screen_height - sy)
+
+                    print(f"[REGION] capture request: surface=({lx},{ty},{w},{h}) screen=({sx},{sy},{sw},{sh})")
+
+                    # capture ONLY what's literally on screen - no homography, no transformations
+                    # this is the actual visible content the user selected
+                    # Hide overlay before capture so the selection rectangle (and any overlay content)
+                    # does not appear inside the captured patch.
+                    overlay.set_visible(False)
+                    overlay.pump_messages()
+                    patch_bgr = overlay.capture_region(sx, sy, sw, sh)
+                    overlay.set_visible(True)
+
+                    print(f"[REGION] capture result: shape={getattr(patch_bgr, 'shape', None)} size={getattr(patch_bgr, 'size', None)}")
+                    
+                    # only proceed if we successfully captured the screen region
+                    if patch_bgr.size > 0 and patch_bgr.shape[0] == sh and patch_bgr.shape[1] == sw:
+                        # send patch to network exactly as captured from screen
+                        print("[REGION] running segmenter...")
+                        mask, produced_path = segmenter.run_on_patch(patch_bgr)
+                        print(f"[REGION] segmenter done: produced_path={produced_path} mask_shape={getattr(mask, 'shape', None)} mask_size={getattr(mask, 'size', None)}")
                         if mask is not None and mask.size != 0:
-                            # store mask to apply persistently
-                            applied_masks.append((sx, sy, mask))
-                    try:
-                        stroke_canvas.strokes.pop()
-                    except Exception:
-                        pass
-                    interaction_mode = InteractionMode.IDLE
-                    selection_points = []
-                    first_fist_hand = None
-                    last_left_fist = False
-                    last_right_fist = False
-            elif interaction_mode == InteractionMode.ERASE and pointer_surface_point is not None:
-                stroke_canvas.erase_at(pointer_surface_point, args.erase_radius)
+                            if mask.shape[:2] != (sh, sw):
+                                mask = cv2.resize(mask, (sw, sh), interpolation=cv2.INTER_NEAREST)
+                            # store in screen coords for exact overlay placement
+                            applied_masks.append((sx, sy, sw, sh, produced_path, mask))
+                        elif produced_path is not None:
+                            applied_masks.append((sx, sy, sw, sh, produced_path, None))
+                    else:
+                        print("[REGION] capture invalid or wrong size; skipping inference")
+
+                    # Stay in REGION_SELECT mode for seamless multiple segmentations.
+                    # Only reset tracker so user can immediately select another region.
+                    selection_tracker.reset()
+                    drawing_active = False
+                    command_classifier.reset()
+            elif interaction_mode == InteractionMode.ERASE:
+                if pointer_surface_point is not None:
+                    stroke_canvas.erase_at(pointer_surface_point, args.erase_radius)
                 drawing_active = False
-            else:
+            elif interaction_mode != InteractionMode.DRAW:
                 drawing_active = False
 
             if len(stroke_canvas.strokes) > args.max_strokes:
@@ -450,23 +452,17 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 cv2.circle(canvas_display, pointer_surface_point, 10, pointer_color, -1, cv2.LINE_AA)
 
             # draw selection preview rectangle (white) if in REGION_SELECT
-            try:
-                if interaction_mode == InteractionMode.REGION_SELECT:
-                    if len(selection_points) >= 1:
-                        a = selection_points[0]
-                        # candidate = opposite hand pointer when first fist recorded
-                        if first_fist_hand == "left":
-                            candidate = pointer_surface_right
-                        elif first_fist_hand == "right":
-                            candidate = pointer_surface_left
-                        else:
-                            candidate = pointer_surface_point
-                        if candidate is not None:
-                            ax, ay = int(a[0]), int(a[1])
-                            cx, cy = int(candidate[0]), int(candidate[1])
-                            cv2.rectangle(canvas_display, (ax, ay), (cx, cy), (255, 255, 255), 2, cv2.LINE_AA)
-            except Exception:
-                pass
+            # must be drawn in screen coords on overlay_frame to match actual capture location
+            selection_preview_rect = None
+            if interaction_mode == InteractionMode.REGION_SELECT:
+                anchor, candidate = selection_tracker.preview()
+                if anchor is not None and candidate is not None:
+                    # convert surface coords to screen coords for accurate preview
+                    ax_screen = int(anchor[0] * scale_x)
+                    ay_screen = int(anchor[1] * scale_y)
+                    cx_screen = int(candidate[0] * scale_x)
+                    cy_screen = int(candidate[1] * scale_y)
+                    selection_preview_rect = (ax_screen, ay_screen, cx_screen, cy_screen)
 
             overlay_rgb = cv2.resize(canvas_display, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
             overlay_frame = np.zeros((screen_height, screen_width, 4), dtype=np.uint8)
@@ -477,32 +473,45 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             overlay_color = overlay_frame[..., :3].copy()
             overlay_alpha = overlay_frame[..., 3].copy()
 
-            # apply any applied masks produced by the segmenter (persistent)
+            # apply any applied masks produced by the segmenter (persistent, already in screen coords)
             if applied_masks:
-                try:
-                    for (mx, my, mmask) in applied_masks:
-                        mh, mw = mmask.shape[:2]
-                        x0 = mx
-                        y0 = my
-                        x1 = min(screen_width, x0 + mw)
-                        y1 = min(screen_height, y0 + mh)
-                        if x1 <= x0 or y1 <= y0:
-                            continue
-                        sub_w = x1 - x0
-                        sub_h = y1 - y0
-                        mask_crop = mmask[0:sub_h, 0:sub_w]
-                        m = (mask_crop > 0)
-                        try:
-                            patch_rgb = overlay_color[y0:y1, x0:x1]
-                            patch_rgb[m] = (255, 255, 255)
-                            overlay_color[y0:y1, x0:x1] = patch_rgb
-                            a_patch = overlay_alpha[y0:y1, x0:x1]
-                            a_patch[m] = 230
-                            overlay_alpha[y0:y1, x0:x1] = a_patch
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                for entry in applied_masks:
+                    if len(entry) != 6:
+                        continue
+                    sx, sy, sw, sh, produced_path, mask_surface = entry
+
+                    x0 = max(0, min(int(sx), screen_width - 1))
+                    y0 = max(0, min(int(sy), screen_height - 1))
+                    x1 = max(x0 + 1, min(int(sx + sw), screen_width))
+                    y1 = max(y0 + 1, min(int(sy + sh), screen_height))
+                    sub_w = x1 - x0
+                    sub_h = y1 - y0
+                    if sub_w <= 0 or sub_h <= 0:
+                        continue
+
+                    produced_img = None
+                    if produced_path and os.path.exists(produced_path):
+                        produced_img = cv2.imread(produced_path, cv2.IMREAD_UNCHANGED)
+                        if produced_img is not None:
+                            if produced_img.ndim == 2:
+                                produced_img = cv2.cvtColor(produced_img, cv2.COLOR_GRAY2BGR)
+                            elif produced_img.shape[2] == 4:
+                                produced_img = cv2.cvtColor(produced_img, cv2.COLOR_BGRA2BGR)
+                            produced_img = cv2.resize(produced_img, (sub_w, sub_h), interpolation=cv2.INTER_AREA)
+
+                    if produced_img is not None:
+                        overlay_color[y0:y1, x0:x1] = produced_img[0:sub_h, 0:sub_w]
+                        overlay_alpha[y0:y1, x0:x1] = 230
+                    elif mask_surface is not None:
+                        if mask_surface.shape[:2] != (sub_h, sub_w):
+                            mask_surface = cv2.resize(mask_surface, (sub_w, sub_h), interpolation=cv2.INTER_NEAREST)
+                        mask_bool = mask_surface > 0
+                        patch_rgb = overlay_color[y0:y1, x0:x1]
+                        patch_rgb[mask_bool] = (255, 255, 255)
+                        overlay_color[y0:y1, x0:x1] = patch_rgb
+                        a_patch = overlay_alpha[y0:y1, x0:x1]
+                        a_patch[mask_bool] = 230
+                        overlay_alpha[y0:y1, x0:x1] = a_patch
 
             
 
@@ -551,6 +560,11 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             overlay_frame[..., :3] = overlay_color
             overlay_frame[..., 3] = overlay_alpha
 
+            # draw selection rectangle preview on final overlay in screen coords
+            if selection_preview_rect is not None:
+                ax_s, ay_s, cx_s, cy_s = selection_preview_rect
+                cv2.rectangle(overlay_frame, (ax_s, ay_s), (cx_s, cy_s), (255, 255, 255, 255), 3, cv2.LINE_AA)
+
             mode_label = MODE_LABELS.get(interaction_mode, interaction_mode.name)
             status_lines = [
                 f"MODO: {mode_label}",
@@ -559,9 +573,10 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             ]
             # show which hand is used for gesture/selection when in region mode
             if interaction_mode == InteractionMode.REGION_SELECT:
-                if gesture_hand == "right":
+                initiator = selection_tracker.initiator_hand
+                if initiator == "right":
                     status_lines.insert(1, "Seleccion: gesto en mano DERECHA; usa IZQUIERDA para definir rect.")
-                elif gesture_hand == "left":
+                elif initiator == "left":
                     status_lines.insert(1, "Seleccion: gesto en mano IZQUIERDA; usa DERECHA para definir rect.")
                 else:
                     status_lines.insert(1, "Seleccion: gesto detectado; usa otra mano para definir rect.")
@@ -590,6 +605,7 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                     applied_masks = []
                 except Exception:
                     pass
+                selection_tracker.reset()
                 drawing_active = False
             if key_pressed == "r":
                 try_request_recognition(surface_view, pointer_surface_point)

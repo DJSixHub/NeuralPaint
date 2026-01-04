@@ -47,6 +47,22 @@ class StrokeCanvas:
         stroke = self.strokes[-1]
         if stroke.points and point == stroke.points[-1]:
             return
+        if stroke.points:
+            last_x, last_y = stroke.points[-1]
+            dx = point[0] - last_x
+            dy = point[1] - last_y
+            dist = math.hypot(dx, dy)
+            # insert intermediate points to keep strokes visually continuous
+            # use a smaller step so the stroke looks smoother even at lower FPS
+            step = max(0.75, self.thickness * 0.25)
+            if dist > step:
+                segments = max(2, int(dist / step))
+                for i in range(1, segments):
+                    t = i / segments
+                    ix = int(round(last_x + dx * t))
+                    iy = int(round(last_y + dy * t))
+                    if (ix, iy) != stroke.points[-1]:
+                        stroke.points.append((ix, iy))
         stroke.points.append(point)
 
     # erase_at elimina secciones de trazos dentro de un círculo con centro y radio dados.
@@ -231,16 +247,13 @@ class StrokeCanvas:
                             break
                         k = (k + 1) % n
                     # create mask
-                    import numpy as _np
-                    import cv2 as _cv2
-
-                    mask = _np.zeros((self.height, self.width), dtype=_np.uint8)
+                    mask = np.zeros((self.height, self.width), dtype=np.uint8)
                     try:
-                        _cv2.fillPoly(mask, [(_np.array(poly, dtype=_np.int32))], 255)
+                        cv2.fillPoly(mask, [(np.array(poly, dtype=np.int32))], 255)
                     except Exception:
                         return None
 
-                    ys, xs = _np.where(mask > 0)
+                    ys, xs = np.where(mask > 0)
                     if ys.size == 0:
                         return None
                     x0 = int(xs.min())

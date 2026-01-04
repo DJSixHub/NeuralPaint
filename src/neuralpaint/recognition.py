@@ -2,22 +2,16 @@
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import time
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
-
-try:
-    import torch
-except ImportError:  # pragma: no cover - torch opcional
-    torch = None  # type: ignore
-
-if TYPE_CHECKING:
-    from easyocr import Reader
+import torch
+from easyocr import Reader
 
 
 # RegionRequest describe un análisis pendiente con metadata de superficie.
@@ -122,7 +116,7 @@ class RegionAnalyzer:
         self._busy = threading.Event()
         self._reader: Optional["Reader"] = None
         if use_gpu:
-            if torch is None or not torch.cuda.is_available():
+            if not torch.cuda.is_available():
                 raise RuntimeError(
                     "GPU solicitado para EasyOCR pero CUDA no está disponible. "
                     "Ejecuta con --easyocr-cpu para forzar modo CPU."
@@ -236,9 +230,6 @@ class RegionAnalyzer:
     def _ensure_reader(self) -> "Reader":
         if self._reader is not None:
             return self._reader
-        # Importamos perezosamente para mantener el hilo principal receptivo.
-        from easyocr import Reader
-
         model_dir_str: Optional[str] = None
         if self._model_dir is not None:
             model_dir_str = str(self._model_dir)

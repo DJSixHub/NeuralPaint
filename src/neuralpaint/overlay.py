@@ -2,17 +2,18 @@
 from __future__ import annotations
 
 import ctypes
+import importlib.util
 from typing import Optional, Sequence
 
 import cv2
 import numpy as np
 
-try:  # pragma: no cover - soporte de superposición en Windows
+if importlib.util.find_spec("win32api") is not None:
     import win32api  # type: ignore
     import win32con  # type: ignore
     import win32gui  # type: ignore
     import win32ui  # type: ignore
-except ImportError:  # pragma: no cover - requiere pywin32 instalado
+else:  # pragma: no cover - pywin32 ausente
     win32api = win32con = win32gui = win32ui = None
 
 
@@ -154,6 +155,22 @@ class OverlayWindow:
         win32gui.ShowWindow(self.hwnd, win32con.SW_SHOW)
         self._closed = False
 
+    def set_visible(self, visible: bool) -> None:
+        if self._closed:
+            return
+        cmd = win32con.SW_SHOWNA if visible else win32con.SW_HIDE
+        win32gui.ShowWindow(self.hwnd, cmd)
+        if visible:
+            win32gui.SetWindowPos(
+                self.hwnd,
+                win32con.HWND_TOPMOST,
+                0,
+                0,
+                self.width,
+                self.height,
+                win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW,
+            )
+
     @staticmethod
     def _wnd_proc(hwnd, msg, wparam, lparam):  # pragma: no cover - GUI message loop
         if msg == win32con.WM_DESTROY:
@@ -201,30 +218,114 @@ class OverlayWindow:
 
     # capture_region toma una captura BGR del escritorio en las coordenadas indicadas.
     def capture_region(self, x: int, y: int, width: int, height: int) -> np.ndarray:
+        # Get actual desktop dimensions for validation
+        desktop_width = ctypes.windll.user32.GetSystemMetrics(0)
+        desktop_height = ctypes.windll.user32.GetSystemMetrics(1)
+        print(f"[CAP] desktop={desktop_width}x{desktop_height} request=({x},{y},{width},{height})")
+        
         if width <= 0 or height <= 0:
+            print(f"[CAP] invalid dimensions: width={width} height={height}")
             return np.zeros((0, 0, 3), dtype=np.uint8)
+        
+        # Validate and clamp coordinates to actual desktop bounds
+        if x < 0 or y < 0 or x >= desktop_width or y >= desktop_height:
+            print(f"[CAP] coordinates out of bounds: x={x} y={y} vs desktop {desktop_width}x{desktop_height}")
+            return np.zeros((0, 0, 3), dtype=np.uint8)
+        
+        # Clamp width/height to stay within desktop
+        if x + width > desktop_width:
+            width = desktop_width - x
+            print(f"[CAP] clamped width to {width}")
+        if y + height > desktop_height:
+            height = desktop_height - y
+            print(f"[CAP] clamped height to {height}")
+        
+        if width <= 0 or height <= 0:
+            print(f"[CAP] invalid dimensions after clamping")
+            return np.zeros((0, 0, 3), dtype=np.uint8)
+        
+        screen_dc = None
         capture_dc = None
         mem_dc = None
         bitmap = None
         try:
-            capture_dc = win32ui.CreateDCFromHandle(self.screen_dc)
+            # Acquire a fresh desktop DC every capture. Reusing a cached DC can become unreliable
+            # after hide/show cycles and can lead to empty captures on subsequent attempts.
+            screen_dc = win32gui.GetDC(0)
+            if not screen_dc:
+                print("[CAP] GetDC(0) returned null")
+                return np.zeros((0, 0, 3), dtype=np.uint8)
+            print(f"[CAP] screen_dc={screen_dc}")
+            
+            capture_dc = win32ui.CreateDCFromHandle(screen_dc)
+            if not capture_dc:
+                print("[CAP] CreateDCFromHandle failed")
+                return np.zeros((0, 0, 3), dtype=np.uint8)
+            print(f"[CAP] capture_dc created")
+            
             mem_dc = capture_dc.CreateCompatibleDC()
+            if not mem_dc:
+                print("[CAP] CreateCompatibleDC failed")
+                return np.zeros((0, 0, 3), dtype=np.uint8)
+            print(f"[CAP] mem_dc created")
+            
+            # Create bitmap - must use GetSafeHdc() to get the raw HDC for Win32 GDI calls
             bitmap = win32ui.CreateBitmap()
-            bitmap.CreateCompatibleBitmap(capture_dc, width, height)
-            mem_dc.SelectObject(bitmap)
-            mem_dc.BitBlt((0, 0), (width, height), capture_dc, (x, y), win32con.SRCCOPY)
-
+            if not bitmap:
+                print("[CAP] CreateBitmap failed")
+                return np.zeros((0, 0, 3), dtype=np.uint8)
+            
+            # CreateCompatibleBitmap needs a valid HDC handle, not the Python DC wrapper
+            try:
+                bitmap.CreateCompatibleBitmap(capture_dc, width, height)
+                print(f"[CAP] CreateCompatibleBitmap succeeded for {width}x{height}")
+            except Exception as e:
+                print(f"[CAP] CreateCompatibleBitmap exception: {e}")
+                return np.zeros((0, 0, 3), dtype=np.uint8)
+            
+            old_obj = mem_dc.SelectObject(bitmap)
+            print(f"[CAP] SelectObject done")
+            
+            # BitBlt using direct Win32 API via ctypes (pywin32's wrapper returns None unreliably)
+            # Get raw HDC handles for the ctypes call
+            h_mem_dc = mem_dc.GetSafeHdc()
+            h_capture_dc = capture_dc.GetSafeHdc()
+            
+            # Call BitBlt directly via ctypes: BOOL BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc, int x1, int y1, DWORD rop)
+            result = ctypes.windll.gdi32.BitBlt(
+                h_mem_dc,      # destination DC
+                0, 0,          # destination x, y
+                width, height, # width, height
+                h_capture_dc,  # source DC
+                x, y,          # source x, y
+                win32con.SRCCOPY  # raster operation
+            )
+            print(f"[CAP] BitBlt (ctypes) result={result}")
+            
+            if not result:
+                print(f"[CAP] BitBlt failed")
+                return np.zeros((0, 0, 3), dtype=np.uint8)
+            
+            print(f"[CAP] BitBlt succeeded, reading bitmap bits...")
+            
             bits = bitmap.GetBitmapBits(True)
             img = np.frombuffer(bits, dtype=np.uint8)
             if img.size != width * height * 4:
+                print(f"[CAP] bitmap size mismatch: got={img.size} expected={width * height * 4}")
                 return np.zeros((0, 0, 3), dtype=np.uint8)
 
             img = img.reshape((height, width, 4))
-            bgr = np.flipud(img)[..., :3]
+            bgr = img[..., :3]
             return np.ascontiguousarray(bgr)
-        except Exception:
+        except Exception as e:
+            print(f"[CAP] exception: {e}")
             return np.zeros((0, 0, 3), dtype=np.uint8)
         finally:
+            if screen_dc is not None:
+                try:
+                    win32gui.ReleaseDC(0, screen_dc)
+                except Exception:
+                    pass
             if bitmap is not None:
                 try:
                     handle = bitmap.GetHandle()

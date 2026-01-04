@@ -3,10 +3,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional
+from typing import Optional, Tuple
 
 import mediapipe as mp
 import numpy as np
+
+
+# devuelve el punto del índice en coords de frame o None
+def hand_index_point(
+    hand_landmarks: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
+    frame_width: int,
+    frame_height: int,
+    min_visibility: float = 0.0,
+) -> Optional[tuple[float, float]]:
+    if hand_landmarks is None:
+        return None
+    tip = hand_landmarks.landmark[mp.solutions.hands.HandLandmark.INDEX_FINGER_TIP]
+    if hasattr(tip, "visibility") and tip.visibility < min_visibility:
+        return None
+    return tip.x * frame_width, tip.y * frame_height
 
 
 # CommandType enumera los comandos detectados del brazo izquierdo.
@@ -39,6 +54,10 @@ class ArmGestureClassifier:
         self._last_raw: CommandType = CommandType.NONE
         self._counter: int = 0
 
+    def reset(self) -> None:
+        self._last_raw = CommandType.NONE
+        self._counter = 0
+
     # update recibe un CommandType crudo y devuelve uno confirmado o None.
     def update(self, raw: CommandType) -> Optional[CommandType]:
         if raw == self._last_raw:
@@ -59,6 +78,26 @@ class ArmGestureClassifier:
 # _to_vec convierte un landmark de MediaPipe a un vector numpy (x, y).
 def _to_vec(landmark) -> np.ndarray:
     return np.array([landmark.x, landmark.y], dtype=np.float32)
+
+
+# extrae el puntero principal: índice derecho o muñeca derecha visible
+def extract_pointer_position(
+    holistic_result,
+    frame_width: int,
+    frame_height: int,
+    min_visibility: float = 0.4,
+) -> Optional[tuple[float, float]]:
+    right_hand = holistic_result.right_hand_landmarks
+    if right_hand:
+        index_tip = right_hand.landmark[8]
+        return index_tip.x * frame_width, index_tip.y * frame_height
+
+    pose_landmarks = holistic_result.pose_landmarks
+    if pose_landmarks:
+        wrist = pose_landmarks.landmark[mp.solutions.pose.PoseLandmark.RIGHT_WRIST]
+        if wrist.visibility >= min_visibility:
+            return wrist.x * frame_width, wrist.y * frame_height
+    return None
 
 
 # classify_left_arm_command analiza el brazo izquierdo y devuelve un CommandType.
@@ -203,5 +242,120 @@ def is_hand_fist(hand_landmarks: Optional[mp.framework.formats.landmark_pb2.Norm
         lm[H.RING_FINGER_TIP].y > lm[H.RING_FINGER_PIP].y + fold_threshold and
         lm[H.PINKY_TIP].y > lm[H.PINKY_PIP].y + fold_threshold
     )
+
+
+@dataclass
+class SelectionGestureTracker:
+    anchor: Optional[Tuple[int, int]] = None
+    initiator_hand: Optional[str] = None
+    candidate: Optional[Tuple[int, int]] = None
+    last_left_fist: bool = False
+    last_right_fist: bool = False
+    prev_index_up_left: bool = False
+    prev_index_up_right: bool = False
+    _confirm_counter: int = 0
+    _confirm_hold_frames: int = 2
+    _debug_last_event: Optional[str] = None
+
+    def reset(self) -> None:
+        self.anchor = None
+        self.initiator_hand = None
+        self.candidate = None
+        self.last_left_fist = False
+        self.last_right_fist = False
+        self.prev_index_up_left = False
+        self.prev_index_up_right = False
+        self._confirm_counter = 0
+        self._debug_last_event = None
+
+    def update(
+        self,
+        left_hand: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
+        right_hand: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
+        pointer_surface_point: Optional[Tuple[int, int]],
+        pointer_surface_left: Optional[Tuple[int, int]],
+        pointer_surface_right: Optional[Tuple[int, int]],
+    ) -> Optional[Tuple[int, int, int, int]]:
+        left_fist = is_hand_fist(left_hand)
+        right_fist = is_hand_fist(right_hand)
+
+        # detect fist rising edge to set anchor
+        left_event = left_fist and not self.last_left_fist
+        right_event = right_fist and not self.last_right_fist
+        self.last_left_fist = left_fist
+        self.last_right_fist = right_fist
+
+        if (left_event or right_event) and self.anchor is None:
+            if left_event and pointer_surface_left is not None:
+                self.anchor = (int(pointer_surface_left[0]), int(pointer_surface_left[1]))
+                self.initiator_hand = "left"
+                self._confirm_counter = 0
+                msg = f"[REGION] anchor set by LEFT fist at {self.anchor}"
+                if self._debug_last_event != msg:
+                    print(msg)
+                    self._debug_last_event = msg
+            elif right_event and pointer_surface_right is not None:
+                self.anchor = (int(pointer_surface_right[0]), int(pointer_surface_right[1]))
+                self.initiator_hand = "right"
+                self._confirm_counter = 0
+
+                msg = f"[REGION] anchor set by RIGHT fist at {self.anchor}"
+                if self._debug_last_event != msg:
+                    print(msg)
+                    self._debug_last_event = msg
+        # candidate is the opposite hand's pointer.
+        # Fallback to the generic pointer if the opposite hand isn't reliably tracked,
+        # otherwise confirmation/capture can get stuck with candidate=None.
+        if self.initiator_hand == "left":
+            self.candidate = pointer_surface_right or pointer_surface_point
+        elif self.initiator_hand == "right":
+            self.candidate = pointer_surface_left or pointer_surface_point
+        else:
+            self.candidate = pointer_surface_point
+
+        # Confirm when initiator hand is NOT a fist and its index is up.
+        # Use a short hold counter (few frames) instead of a rising-edge requirement,
+        # because on subsequent selections the index can already be up and we'd
+        # otherwise miss the edge and never confirm.
+        idx_up_right = is_index_finger_up(right_hand)
+        idx_up_left = is_index_finger_up(left_hand)
+
+        confirm = False
+        if self.anchor is not None and self.candidate is not None:
+            can_confirm = False
+            if self.initiator_hand == "right":
+                can_confirm = idx_up_right and not right_fist
+            elif self.initiator_hand == "left":
+                can_confirm = idx_up_left and not left_fist
+
+            if can_confirm:
+                self._confirm_counter += 1
+            else:
+                self._confirm_counter = 0
+
+            if self._confirm_counter >= max(1, int(self._confirm_hold_frames)):
+                confirm = True
+
+        self.prev_index_up_right = idx_up_right
+        self.prev_index_up_left = idx_up_left
+
+        if confirm and self.anchor is not None and self.candidate is not None:
+            p0 = self.anchor
+            p1 = self.candidate
+            lx, rx = sorted((int(p0[0]), int(p1[0])))
+            ty, by = sorted((int(p0[1]), int(p1[1])))
+            w = max(1, rx - lx)
+            h = max(1, by - ty)
+            rect = (lx, ty, w, h)
+            msg = f"[REGION] confirm by {self.initiator_hand} index -> rect={rect}"
+            if self._debug_last_event != msg:
+                print(msg)
+                self._debug_last_event = msg
+            self.reset()
+            return rect
+        return None
+
+    def preview(self) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
+        return self.anchor, self.candidate
 
 

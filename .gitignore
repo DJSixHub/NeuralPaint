@@ -17,3 +17,10 @@ Reconocimiento de Caracteres/assets/fonts/
 *.woff2
 *.woff
 *.pt
+
+# Agentic/AI assistant files
+.github/copilot-instructions.md
+copilot-instructions.md
+.cursorrules
+.aider*
+.clinerules

@@ -1,6 +1,6 @@
 # NeuralPaint
 
-Herramienta de dibujo interactivo que usa solo una cámara para seguir tus manos y proyectar sobre pantallas. Incluye reconocimiento de caracteres mediante redes neuronales U-Net para segmentación avanzada.
+Herramienta de dibujo interactivo que usa solo una cámara para seguir tus manos y proyectar sobre pantallas. Incluye segmentación de regiones con una red ResUNet para aplicar efectos sobre lo que el usuario selecciona.
 
 ## Instalación rápida
 
@@ -19,12 +19,12 @@ Herramienta de dibujo interactivo que usa solo una cámara para seguir tus manos
 
 2. **Instalar dependencias principales**:
    ```powershell
-   pip install opencv-contrib-python mediapipe numpy pywin32 easyocr torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+  pip install opencv-contrib-python mediapipe numpy pywin32 torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
    ```
 
    > **Nota GPU**: Si tu GPU no soporta CUDA o prefieres CPU, instala PyTorch sin CUDA:
    > ```powershell
-   > pip install opencv-contrib-python mediapipe numpy pywin32 easyocr torch torchvision torchaudio
+  > pip install opencv-contrib-python mediapipe numpy pywin32 torch torchvision torchaudio
    > ```
 
 3. **Verificar instalación**:
@@ -138,7 +138,7 @@ python src/neural_paint.py --camera 0 --dual-monitor
 - ✅ Canvas con dibujos
 - ✅ Cursor/puntero de mano
 - ✅ Mensajes de estado (modo actual, instrucciones)
-- ✅ Resultados de OCR y segmentación
+- ✅ Resultados de segmentación (efectos aplicados en regiones)
 
 **Proyector/monitor secundario**:
 - ✅ Canvas con dibujos
@@ -163,20 +163,23 @@ NeuralPaint usa **MediaPipe Holistic** para detectar pose y manos. Los gestos se
 | **Brazo horizontal, antebrazo abajo** | ![](assets/erase.png) | Activa modo **BORRAR** (radio configurable con `--erase-radius`) |
 | **Brazo horizontal, antebrazo horizontal** | ![](assets/color.png) | Abre selector de **COLORES** (mantén mano derecha 3s sobre un color) |
 | **Brazo extendido verticalmente arriba** | ![](assets/clear.png) | **LIMPIA TODO** el canvas |
-| **Ambos índices arriba** | ![](assets/region.png) | Entra a modo **SELECCIÓN DE REGIÓN** (para OCR/segmentación) |
+| **Ambos índices arriba** | ![](assets/region.png) | Entra a modo **SELECCIÓN DE REGIÓN** (segmentación y efectos) |
 
-### Flujo de selección de región (OCR/Segmentación)
+### Flujo de selección de región (Segmentación y efectos)
 
 1. **Activar**: Levanta ambos índices → modo `REGION_SELECT`
-2. **Anclar esquina**: Cierra una mano en puño → se fija la esquina inicial
-3. **Ajustar tamaño**: Mueve la otra mano para dimensionar el rectángulo
-4. **Confirmar**: Levanta el índice de la **misma mano que hizo el puño** → se captura y procesa
+2. **Definir rectángulo**: el **índice izquierdo** marca una esquina (ancla) y el **índice derecho** la esquina opuesta (candidato)
+3. **Confirmar + elegir efecto** (por flanco, sin soltar los índices):
+  - **Dedo medio derecho arriba** → `colorize`
+  - **Dedo medio izquierdo arriba** → `underline`
+  - **Meñique izquierdo arriba** → `aura`
 
 El sistema:
-- Captura la región de pantalla en las coordenadas seleccionadas
-- La envía a la red U-Net de segmentación (`models/checkpoint_epoch_70.pth`)
-- Produce una máscara de caracteres/trazos
-- La superpone coloreada en el canvas (verde para texto, rojo para ruido)
+- Captura la región real de pantalla en las coordenadas seleccionadas
+- La envía a la ResUNet de segmentación (`models/segmentation/fine_tuning_checkpoint_epoch_10.pth` por defecto)
+- La ResUNet produce una máscara binaria identificando trazos/texto en la región
+- Aplica el efecto elegido (colorize/underline/aura) usando el **color activo del pincel**
+- Superpone el resultado en el canvas exactamente en las mismas coordenadas de pantalla (persiste hasta limpiar con gesto o tecla `c`)
 
 ### Atajos de teclado
 
@@ -184,7 +187,6 @@ El sistema:
 |-------|--------|
 | `q` | Salir de la aplicación |
 | `c` | Limpiar todo el canvas (igual que gesto de brazo arriba) |
-| `r` | Forzar reconocimiento OCR en región del puntero |
 
 ### Parámetros configurables
 
@@ -230,7 +232,7 @@ NeuralPaint integra visión por computadora, procesamiento de gestos y redes neu
   - Brazo vertical arriba → `CLEAR_ALL`
 - **`ArmGestureClassifier`**: acumula `--command-hold-frames` consecutivos del mismo gesto para confirmar (evita falsos positivos)
 - **Selección de región**: `both_index_fingers_up()` detecta ambos índices levantados
-  - `SelectionGestureTracker` maneja el flujo: ancla puño → arrastra → confirma con índice
+  - `SelectionGestureTracker` maneja el flujo: índices arriba (ambos) → ancla izquierda + candidato derecho → confirma con dedo medio/meñique (selecciona efecto)
 
 ### 5. Gestión de modos e interacción
 - **Estado global**: `InteractionMode` (IDLE, DRAW, ERASE, COLOR_SELECT, REGION_SELECT)
@@ -247,7 +249,7 @@ NeuralPaint integra visión por computadora, procesamiento de gestos y redes neu
 - Límite de `--max-strokes` (por defecto 200); descarta los más antiguos al exceder
 - Canvas es RGB de tamaño `surface_width × surface_height`
 
-### 7. Segmentación con U-Net
+### 7. Segmentación con ResUNet
 - **Captura de región**:
   - Modo REGION_SELECT → usuario define rectángulo con dos manos
   - Al confirmar con gesto: captura píxeles de pantalla reales con Win32 API (`OverlayWindow.capture_region()`)
@@ -305,7 +307,7 @@ mientras running:
      - REGION_SELECT: manejar ancla + resize + confirmación
   8. Renderizar canvas + overlay
   9. Actualizar ventana(s) overlay (principal + proyector si dual-monitor)
-  10. Manejar input de teclado ('q', 'c', 'r')
+  10. Manejar input de teclado ('q', 'c')
 ```
 
 ### Componentes clave del código
@@ -318,25 +320,30 @@ mientras running:
 | `src/neuralpaint/gestures.py` | Clasificación de comandos de brazo, detección de dedos, SelectionGestureTracker |
 | `src/neuralpaint/strokes.py` | `StrokeCanvas`: gestión de trazos, renderizado, borrado |
 | `src/neuralpaint/overlay.py` | `OverlayWindow`: ventana transparente Win32, captura de pantalla, dual-monitor |
-| `src/neuralpaint/segmentation.py` | `Segmenter`: wrapper de red U-Net, invoca subprocess con modelo checkpoint |
+| `src/neuralpaint/segmentation.py` | `Segmenter`: wrapper de ResUNet, invoca subprocess con checkpoint de segmentación |
 | `src/neuralpaint/color_picker.py` | `ColorPicker`: rueda HSV, detección de hover, selección de color |
 | `Reconocimiento de Caracteres/scripts/inference/testing.py` | Script de segmentación ResUNet (llamado por `Segmenter` vía subprocess) |
 
 ### Archivos de modelos y calibración
 
 - **`calibration/homography.npz`**: matriz 3×3 de homografía cámara→superficie
-- **`models/segmentation/fine_tuning_checkpoint_epoch_10.pth`**: pesos de ResUNet fine-tuned (Stage 2 con weighted BCE)
-- **`models/segmentation/checkpoint_epoch_70.pth`**: pesos alternativos de Stage 1 (BCE + edge loss)
-- **`masc_produced/`**: inputs/outputs temporales de segmentación (debug: `*_original.png`, `*_mask.png`)
+- **`models/segmentation/fine_tuning_checkpoint_epoch_10.pth`**: ResUNet fine-tuned (Stage 2 con weighted BCE), modelo por defecto
+- **`models/segmentation/checkpoint_epoch_70.pth`**: ResUNet de Stage 1 (BCE + edge loss), alternativa
+- **`masc_produced/`**: inputs/outputs temporales de segmentación para debug (`*_original.png`, `*_mask.png`)
 
 ## Extensibilidad
 
-### Añadir nuevos gestos
-1. Edita `classify_left_arm_command()` en `gestures.py`
+### Añadir nuevos gestos de brazo
+1. Edita `classify_left_arm_command()` en [gestures.py](src/neuralpaint/gestures.py)
 2. Añade un nuevo `CommandType` al enum
-3. Maneja el comando en `app.py` dentro del loop principal
+3. Maneja el comando en [app.py](src/neuralpaint/app.py) dentro del loop principal
 
-### Modificar red de segmentación
+### Añadir nuevos efectos de segmentación
+1. Define el gesto de confirmación en `SelectionGestureTracker.update()` ([gestures.py](src/neuralpaint/gestures.py))
+2. Implementa el efecto visual en `apply_effect()` ([segmentation_options.py](src/neuralpaint/segmentation_options.py))
+3. El efecto recibe la máscara y el color del pincel activo para generar BGRA
+
+### Entrenar o cambiar modelo de segmentación
 1. Entrena nuevo modelo con `Reconocimiento de Caracteres/scripts/training/train_segmentation_clean.py`
 2. Actualiza ruta en `Segmenter.__init__()` (`segmentation.py`)
 3. Asegura compatibilidad de entrada 256×256 y salida de máscara

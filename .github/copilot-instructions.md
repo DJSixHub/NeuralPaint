@@ -12,7 +12,6 @@ Quick commands (Windows examples):
 
 - Calibrate only: `python src/neural_paint.py --camera 0 --calibration-only --calibration-warp`
 - Run interactive mode: `python src/neural_paint.py --camera 0`
-- Force CPU OCR: add `--easyocr-cpu` or supply `--easyocr-models` folder for EasyOCR weights.
 
 Project-specific patterns and gotchas:
 

@@ -60,17 +60,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--mode-toggle-delay", type=float, default=3.0, help="Segundos antes de volver a inactivo tras repetir gesto de dibujar/borrar.")
     parser.add_argument("--no-flip", action="store_true", help="Desactiva las vistas previas en espejo.")
     parser.add_argument(
-        "--easyocr-models",
-        type=Path,
-        default=None,
-        help="Carpeta con los pesos de EasyOCR (no se descargan en tiempo de ejecución).",
-    )
-    parser.add_argument(
-        "--easyocr-cpu",
-        action="store_true",
-        help="Forzar EasyOCR en CPU (por defecto usa GPU si está disponible).",
-    )
-    parser.add_argument(
         "--dual-monitor",
         action="store_true",
         help="Habilitar modo de dos monitores: UI en monitor principal, canvas en proyector.",
@@ -94,9 +83,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     args.flip_view = not args.no_flip
-    if args.easyocr_models is not None:
-        args.easyocr_models = args.easyocr_models.expanduser().resolve()
-    args.easyocr_gpu = not args.easyocr_cpu
     if args.surface_width <= 0 or args.surface_height <= 0:
         screen_width = ctypes.windll.user32.GetSystemMetrics(0)
         screen_height = ctypes.windll.user32.GetSystemMetrics(1)

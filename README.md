@@ -247,20 +247,23 @@ NeuralPaint integra visión por computadora, procesamiento de gestos y redes neu
 - Límite de `--max-strokes` (por defecto 200); descarta los más antiguos al exceder
 - Canvas es RGB de tamaño `surface_width × surface_height`
 
-### 7. Segmentación y OCR
+### 7. Segmentación con U-Net
 - **Captura de región**:
-  - Modo REGION_SELECT → usuario define rectángulo
-  - Al confirmar: captura píxeles de pantalla con Win32 API (`OverlayWindow.capture_screen_region()`)
-  - Se escribe como PNG temporal en `masc_produced/input_*.png`
-- **Red U-Net** (`Segmenter`):
-  - Modelo: `models/checkpoint_epoch_70.pth` (entrenado en Stage 1 con BCE + edge loss)
-  - Input: región capturada (256×256 normalizado)
-  - Output: máscara binaria (probabilidad de texto/trazo)
-  - Genera: `*_mask.png`, `*_overlay.png` (coloreado)
-- **Clasificación** (`RegionAnalyzer`):
-  - Detecta si es texto legible o solo trazos
-  - Aplica efecto coloreado (verde=texto, rojo=ruido, azul=matemáticas)
-  - Se superpone en el canvas en las coordenadas originales
+  - Modo REGION_SELECT → usuario define rectángulo con dos manos
+  - Al confirmar con gesto: captura píxeles de pantalla reales con Win32 API (`OverlayWindow.capture_region()`)
+  - Región capturada se procesa directamente (sin homografía/warping, es lo que el usuario ve en pantalla)
+- **Red ResUNet** (`Segmenter`):
+  - Script: `Reconocimiento de Caracteres/scripts/inference/testing.py` (llamado vía subprocess)
+  - Modelo por defecto: `models/segmentation/fine_tuning_checkpoint_epoch_10.pth` (ResUNet con base=24, GroupNorm, SiLU, SE blocks)
+  - Input: región capturada BGR (se redimensiona a 256×256 o procesa con sliding window si es más grande)
+  - Output: máscara de probabilidad float32 (0-1) del tamaño original
+  - Genera archivos debug en `masc_produced/`: `*_original.png` (input), `*_mask.png` (máscara cruda)
+- **Aplicación de efectos**:
+  - Usuario selecciona efecto con gesto de mano **durante la confirmación** de la región
+  - No hay clasificación automática: el color/efecto aplicado es el **color activo del pincel**
+  - `apply_effect()` colorea la máscara con el color BGR actual del usuario
+  - Efecto se almacena como BGRA (color + alpha de máscara) y se superpone en el canvas en las coordenadas exactas de pantalla
+  - Efectos persisten hasta que se limpie el canvas (gesto brazo arriba o tecla `c`)
 
 ### 8. Overlay en pantalla completa
 - **`OverlayWindow`** (requiere `pywin32` en Windows):
@@ -270,7 +273,7 @@ NeuralPaint integra visión por computadora, procesamiento de gestos y redes neu
     - Canvas con trazos
     - Cursor circular (color actual + radio erase si aplica)
     - Vista previa de cámara (esquina superior izquierda, `--preview-scale`)
-    - Banner de estado (modo actual, mensajes OCR, instrucciones)
+    - Banner de estado (modo actual, instrucciones)
 - **Dual-monitor**:
   - Monitor principal: overlay completo (UI + canvas)
   - Proyector: overlay limpio (solo canvas + máscaras aplicadas, sin UI)
@@ -279,7 +282,7 @@ NeuralPaint integra visión por computadora, procesamiento de gestos y redes neu
 - **Mensajes de estado**:
   - "Calibrando..." / "Guardado con 's', Cancelar con 'q'" (durante calibración)
   - "MODO: DIBUJAR / BORRAR / COLORES / SELECCIÓN" (en overlay)
-  - "Reconociendo región..." / "Texto detectado: X caracteres" (post-OCR)
+  - "Segmentando región..." (durante procesamiento de segmentación)
 - **Indicadores**:
   - Cursor: círculo relleno del color activo (o rojo con radio en modo ERASE)
   - Rectángulo de selección: borde amarillo animado durante ajuste
@@ -310,22 +313,21 @@ mientras running:
 | Archivo | Responsabilidad |
 |---------|----------------|
 | `src/neural_paint.py` | Entry point CLI, parsing args, lanza calibración + app |
-| `src/neuralpaint/app.py` | Loop principal, orquesta MediaPipe, gestos, canvas, overlay, OCR |
+| `src/neuralpaint/app.py` | Loop principal, orquesta MediaPipe, gestos, canvas, overlay, segmentación |
 | `src/neuralpaint/calibration.py` | Detección de contorno/AprilTags, cálculo de homografía |
 | `src/neuralpaint/gestures.py` | Clasificación de comandos de brazo, detección de dedos, SelectionGestureTracker |
 | `src/neuralpaint/strokes.py` | `StrokeCanvas`: gestión de trazos, renderizado, borrado |
 | `src/neuralpaint/overlay.py` | `OverlayWindow`: ventana transparente Win32, captura de pantalla, dual-monitor |
 | `src/neuralpaint/segmentation.py` | `Segmenter`: wrapper de red U-Net, invoca subprocess con modelo checkpoint |
-| `src/neuralpaint/recognition.py` | `RegionAnalyzer`: wrapper de EasyOCR, clasifica texto vs fórmulas |
 | `src/neuralpaint/color_picker.py` | `ColorPicker`: rueda HSV, detección de hover, selección de color |
-| `Reconocimiento de Caracteres/scripts/inference/testing.py` | Script de segmentación U-Net (llamado por `Segmenter`) |
+| `Reconocimiento de Caracteres/scripts/inference/testing.py` | Script de segmentación ResUNet (llamado por `Segmenter` vía subprocess) |
 
 ### Archivos de modelos y calibración
 
 - **`calibration/homography.npz`**: matriz 3×3 de homografía cámara→superficie
-- **`models/checkpoint_epoch_70.pth`**: pesos de U-Net entrenada (Stage 1: BCE + edge loss)
-- **`models/easyocr/`**: modelos de EasyOCR (CRAFT, reconocimiento de texto)
-- **`masc_produced/`**: inputs/outputs temporales de segmentación (debug)
+- **`models/segmentation/fine_tuning_checkpoint_epoch_10.pth`**: pesos de ResUNet fine-tuned (Stage 2 con weighted BCE)
+- **`models/segmentation/checkpoint_epoch_70.pth`**: pesos alternativos de Stage 1 (BCE + edge loss)
+- **`masc_produced/`**: inputs/outputs temporales de segmentación (debug: `*_original.png`, `*_mask.png`)
 
 ## Extensibilidad
 
@@ -333,10 +335,6 @@ mientras running:
 1. Edita `classify_left_arm_command()` en `gestures.py`
 2. Añade un nuevo `CommandType` al enum
 3. Maneja el comando en `app.py` dentro del loop principal
-
-### Cambiar motor de OCR
-1. Reemplaza `RegionAnalyzer` en `recognition.py`
-2. Mantén la interfaz: `analyze_region(image_path) → RecognitionResult`
 
 ### Modificar red de segmentación
 1. Entrena nuevo modelo con `Reconocimiento de Caracteres/scripts/training/train_segmentation_clean.py`
@@ -349,7 +347,5 @@ mientras running:
 3. Cambia colores en `StrokeCanvas.render()` (`strokes.py`)
 
 ---
-
-**Documentación completa**: Ver `.github/copilot-instructions.md` y `DUAL_MONITOR.md` para detalles internos.
 
 **Entrenamiento de modelos**: Ver `Reconocimiento de Caracteres/README.md` y `STRUCTURE.md` para pipeline de datos y HPO.

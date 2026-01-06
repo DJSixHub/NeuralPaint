@@ -1,4 +1,4 @@
-# Clasificación de gestos de brazo y modos de interacción.
+# Clasificación de gestos del brazo y modos de interacción.
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,7 +9,7 @@ import mediapipe as mp
 import numpy as np
 
 
-# devuelve el punto del índice en coords de frame o None
+# Devuelve la posición (x,y) de la punta del índice en coordenadas del frame, o None si no hay mano/visibilidad.
 def hand_index_point(
     hand_landmarks: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
     frame_width: int,
@@ -24,7 +24,7 @@ def hand_index_point(
     return tip.x * frame_width, tip.y * frame_height
 
 
-# CommandType enumera los comandos detectados del brazo izquierdo.
+# Enumera comandos detectados en el brazo izquierdo.
 class CommandType(Enum):
     NONE = auto()
     DRAW_MODE = auto()
@@ -34,7 +34,7 @@ class CommandType(Enum):
     COLOR_PICKER = auto()
 
 
-# InteractionMode define el estado actual del flujo de dibujo.
+# Define el estado actual del flujo de interacción/dibujo.
 class InteractionMode(Enum):
     IDLE = auto()
     DRAW = auto()
@@ -43,22 +43,23 @@ class InteractionMode(Enum):
     REGION_SELECT = auto()
 
 
-# ArmGestureClassifier estabiliza comandos cronometrando cuadros consecutivos.
+# Estabiliza comandos del brazo acumulando cuadros consecutivos del mismo gesto.
 @dataclass
 class ArmGestureClassifier:
     hold_frames: int
 
-    # __post_init__ garantiza un mínimo de cuadros y reinicia el estado interno.
+    # Inicializa el clasificador garantizando un mínimo de cuadros y reiniciando el estado interno.
     def __post_init__(self) -> None:
         self.hold_frames = max(1, self.hold_frames)
         self._last_raw: CommandType = CommandType.NONE
         self._counter: int = 0
 
+    # Reinicia el estado interno del clasificador (último comando y contador).
     def reset(self) -> None:
         self._last_raw = CommandType.NONE
         self._counter = 0
 
-    # update recibe un CommandType crudo y devuelve uno confirmado o None.
+    # Consume un comando crudo y devuelve el comando confirmado cuando se sostuvo suficientes cuadros.
     def update(self, raw: CommandType) -> Optional[CommandType]:
         if raw == self._last_raw:
             self._counter += 1
@@ -75,12 +76,12 @@ class ArmGestureClassifier:
         return None
 
 
-# _to_vec convierte un landmark de MediaPipe a un vector numpy (x, y).
+# Convierte un landmark de MediaPipe a un vector numpy (x, y).
 def _to_vec(landmark) -> np.ndarray:
     return np.array([landmark.x, landmark.y], dtype=np.float32)
 
 
-# extrae el puntero principal: índice derecho o muñeca derecha visible
+# Extrae el puntero principal: punta del índice derecho si hay mano; si no, muñeca derecha del pose si es visible.
 def extract_pointer_position(
     holistic_result,
     frame_width: int,
@@ -100,7 +101,7 @@ def extract_pointer_position(
     return None
 
 
-# classify_left_arm_command analiza el brazo izquierdo y devuelve un CommandType.
+# Clasifica el gesto del brazo izquierdo (pose) y devuelve el comando correspondiente.
 def classify_left_arm_command(
     pose_landmarks: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
     min_visibility: float = 0.5,
@@ -154,15 +155,11 @@ def classify_left_arm_command(
     return CommandType.NONE
 
 
+ # Detecta si el pulgar izquierdo está arriba y los otros dedos están plegados (heurística basada en landmarks).
 def is_left_thumb_up(
     hand_landmarks: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
     min_visibility: float = 0.5,
 ) -> bool:
-    """Heurística simple para detectar pulgar hacia arriba en la mano izquierda.
-
-    Requiere que la punta del pulgar esté por encima (y menor y) de la muñeca
-    y que las otras puntas de dedos estén plegadas (más abajo que sus PIP).
-    """
     if hand_landmarks is None:
         return False
 
@@ -189,11 +186,11 @@ def is_left_thumb_up(
     thumb_tip_y = lm[mp.solutions.hands.HandLandmark.THUMB_TIP].y
     thumb_ip_y = lm[mp.solutions.hands.HandLandmark.THUMB_IP].y
 
-    # pulgar arriba: tip por encima de la muñeca y por encima del IP
+    # Pulgar arriba: la punta está por encima de la muñeca y por encima del IP.
     if not (thumb_tip_y + 0.03 < wrist_y and thumb_tip_y + 0.01 < thumb_ip_y):
         return False
 
-    # otros dedos plegados: tip más abajo que su PIP
+    # Otros dedos plegados: la punta está por debajo de su PIP.
     idx_cond = lm[mp.solutions.hands.HandLandmark.INDEX_FINGER_TIP].y > lm[mp.solutions.hands.HandLandmark.INDEX_FINGER_PIP].y + 0.01
     mid_cond = lm[mp.solutions.hands.HandLandmark.MIDDLE_FINGER_TIP].y > lm[mp.solutions.hands.HandLandmark.MIDDLE_FINGER_PIP].y + 0.01
     ring_cond = lm[mp.solutions.hands.HandLandmark.RING_FINGER_TIP].y > lm[mp.solutions.hands.HandLandmark.RING_FINGER_PIP].y + 0.01
@@ -204,11 +201,11 @@ def is_left_thumb_up(
     return False
 
 
+ # Detecta si el índice está levantado (punta por encima de su PIP) y los demás dedos están plegados.
 def is_index_finger_up(
     hand_landmarks: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
     min_visibility: float = 0.5,
 ) -> bool:
-    """Detect if the index finger is raised (tip above its PIP and other fingers folded)."""
     if hand_landmarks is None:
         return False
     lm = hand_landmarks.landmark
@@ -219,16 +216,41 @@ def is_index_finger_up(
     return bool(idx_up and mid_fold and ring_fold and pinky_fold)
 
 
+ # Detecta si el dedo medio está levantado (punta por encima de su PIP).
+def is_middle_finger_up(
+    hand_landmarks: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
+    min_visibility: float = 0.5,
+) -> bool:
+    if hand_landmarks is None:
+        return False
+    lm = hand_landmarks.landmark
+    mid_up = lm[mp.solutions.hands.HandLandmark.MIDDLE_FINGER_TIP].y < lm[mp.solutions.hands.HandLandmark.MIDDLE_FINGER_PIP].y - 0.02
+    return bool(mid_up)
+
+
+ # Detecta si el meñique está levantado (punta por encima de su PIP).
+def is_pinky_finger_up(
+    hand_landmarks: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
+    min_visibility: float = 0.5,
+) -> bool:
+    if hand_landmarks is None:
+        return False
+    lm = hand_landmarks.landmark
+    pinky_up = lm[mp.solutions.hands.HandLandmark.PINKY_TIP].y < lm[mp.solutions.hands.HandLandmark.PINKY_PIP].y - 0.02
+    return bool(pinky_up)
+
+
+ # Devuelve True si ambas manos existen y ambas tienen el índice levantado.
 def both_index_fingers_up(
     left_hand: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
     right_hand: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
 ) -> bool:
-    """Return True if both hands are present and both have the index finger up."""
     if left_hand is None or right_hand is None:
         return False
     return is_index_finger_up(left_hand) and is_index_finger_up(right_hand)
 
 
+ # Detecta si la mano está en puño (todas las puntas por debajo de sus PIP por un umbral).
 def is_hand_fist(hand_landmarks: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList], fold_threshold: float = 0.02) -> bool:
     if hand_landmarks is None:
         return False
@@ -247,27 +269,29 @@ def is_hand_fist(hand_landmarks: Optional[mp.framework.formats.landmark_pb2.Norm
 @dataclass
 class SelectionGestureTracker:
     anchor: Optional[Tuple[int, int]] = None
-    initiator_hand: Optional[str] = None
+    initiator_hand: Optional[str] = None  # Which hand moves the rectangle
     candidate: Optional[Tuple[int, int]] = None
-    last_left_fist: bool = False
-    last_right_fist: bool = False
-    prev_index_up_left: bool = False
-    prev_index_up_right: bool = False
+    prev_middle_up_left: bool = False
+    prev_middle_up_right: bool = False
+    prev_pinky_up_left: bool = False
+    prev_pinky_up_right: bool = False
     _confirm_counter: int = 0
     _confirm_hold_frames: int = 2
     _debug_last_event: Optional[str] = None
 
+    # Reinicia el estado del flujo de selección de región (ancla, candidato, mano iniciadora y contadores).
     def reset(self) -> None:
         self.anchor = None
         self.initiator_hand = None
         self.candidate = None
-        self.last_left_fist = False
-        self.last_right_fist = False
-        self.prev_index_up_left = False
-        self.prev_index_up_right = False
+        self.prev_middle_up_left = False
+        self.prev_middle_up_right = False
+        self.prev_pinky_up_left = False
+        self.prev_pinky_up_right = False
         self._confirm_counter = 0
         self._debug_last_event = None
 
+    # Actualiza el estado de selección y detecta confirmación con dedos extra para escoger el efecto.
     def update(
         self,
         left_hand: Optional[mp.framework.formats.landmark_pb2.NormalizedLandmarkList],
@@ -275,71 +299,51 @@ class SelectionGestureTracker:
         pointer_surface_point: Optional[Tuple[int, int]],
         pointer_surface_left: Optional[Tuple[int, int]],
         pointer_surface_right: Optional[Tuple[int, int]],
-    ) -> Optional[Tuple[int, int, int, int]]:
-        left_fist = is_hand_fist(left_hand)
-        right_fist = is_hand_fist(right_hand)
-
-        # detect fist rising edge to set anchor
-        left_event = left_fist and not self.last_left_fist
-        right_event = right_fist and not self.last_right_fist
-        self.last_left_fist = left_fist
-        self.last_right_fist = right_fist
-
-        if (left_event or right_event) and self.anchor is None:
-            if left_event and pointer_surface_left is not None:
+    ) -> Optional[Tuple[Tuple[int, int, int, int], str]]:
+        # Inicializa la selección: cuando hay dos punteros (izq/der), fija ancla y candidato.
+        if self.anchor is None and pointer_surface_left is not None and pointer_surface_right is not None:
+            # Convención: izquierda ancla, derecha dimensiona; se actualizan ambas con el tiempo.
+            self.anchor = (int(pointer_surface_left[0]), int(pointer_surface_left[1]))
+            self.candidate = (int(pointer_surface_right[0]), int(pointer_surface_right[1]))
+            self.initiator_hand = "right"  # right hand moves the rectangle
+            msg = f"[REGION] selection started: anchor={self.anchor} (left), moving=right"
+            if self._debug_last_event != msg:
+                print(msg)
+                self._debug_last_event = msg
+        
+        # Actualiza posiciones: ancla sigue la izquierda; candidato sigue la derecha.
+        if self.anchor is not None:
+            if pointer_surface_left is not None:
                 self.anchor = (int(pointer_surface_left[0]), int(pointer_surface_left[1]))
-                self.initiator_hand = "left"
-                self._confirm_counter = 0
-                msg = f"[REGION] anchor set by LEFT fist at {self.anchor}"
-                if self._debug_last_event != msg:
-                    print(msg)
-                    self._debug_last_event = msg
-            elif right_event and pointer_surface_right is not None:
-                self.anchor = (int(pointer_surface_right[0]), int(pointer_surface_right[1]))
-                self.initiator_hand = "right"
-                self._confirm_counter = 0
+            if pointer_surface_right is not None:
+                self.candidate = (int(pointer_surface_right[0]), int(pointer_surface_right[1]))
 
-                msg = f"[REGION] anchor set by RIGHT fist at {self.anchor}"
-                if self._debug_last_event != msg:
-                    print(msg)
-                    self._debug_last_event = msg
-        # candidate is the opposite hand's pointer.
-        # Fallback to the generic pointer if the opposite hand isn't reliably tracked,
-        # otherwise confirmation/capture can get stuck with candidate=None.
-        if self.initiator_hand == "left":
-            self.candidate = pointer_surface_right or pointer_surface_point
-        elif self.initiator_hand == "right":
-            self.candidate = pointer_surface_left or pointer_surface_point
-        else:
-            self.candidate = pointer_surface_point
+        # Detecta flancos de subida de dedos adicionales para elegir el tipo de efecto.
+        # Nota: durante selección ya están los índices arriba, así que se miran dedos extra.
+        mid_up_left = is_middle_finger_up(left_hand)
+        mid_up_right = is_middle_finger_up(right_hand)
+        pinky_up_left = is_pinky_finger_up(left_hand)
+        pinky_up_right = is_pinky_finger_up(right_hand)
 
-        # Confirm when initiator hand is NOT a fist and its index is up.
-        # Use a short hold counter (few frames) instead of a rising-edge requirement,
-        # because on subsequent selections the index can already be up and we'd
-        # otherwise miss the edge and never confirm.
-        idx_up_right = is_index_finger_up(right_hand)
-        idx_up_left = is_index_finger_up(left_hand)
-
-        confirm = False
+        effect_type = None
         if self.anchor is not None and self.candidate is not None:
-            can_confirm = False
-            if self.initiator_hand == "right":
-                can_confirm = idx_up_right and not right_fist
-            elif self.initiator_hand == "left":
-                can_confirm = idx_up_left and not left_fist
+            # Medio derecho → colorear texto.
+            if mid_up_right and not self.prev_middle_up_right:
+                effect_type = "colorize"
+            # Medio izquierdo → subrayar.
+            elif mid_up_left and not self.prev_middle_up_left:
+                effect_type = "underline"
+            # Meñique izquierdo → aura.
+            elif pinky_up_left and not self.prev_pinky_up_left:
+                effect_type = "aura"
 
-            if can_confirm:
-                self._confirm_counter += 1
-            else:
-                self._confirm_counter = 0
+        # Actualiza estados previos para detección por flanco.
+        self.prev_middle_up_left = mid_up_left
+        self.prev_middle_up_right = mid_up_right
+        self.prev_pinky_up_left = pinky_up_left
+        self.prev_pinky_up_right = pinky_up_right
 
-            if self._confirm_counter >= max(1, int(self._confirm_hold_frames)):
-                confirm = True
-
-        self.prev_index_up_right = idx_up_right
-        self.prev_index_up_left = idx_up_left
-
-        if confirm and self.anchor is not None and self.candidate is not None:
+        if effect_type and self.anchor is not None and self.candidate is not None:
             p0 = self.anchor
             p1 = self.candidate
             lx, rx = sorted((int(p0[0]), int(p1[0])))
@@ -347,14 +351,15 @@ class SelectionGestureTracker:
             w = max(1, rx - lx)
             h = max(1, by - ty)
             rect = (lx, ty, w, h)
-            msg = f"[REGION] confirm by {self.initiator_hand} index -> rect={rect}"
+            msg = f"[REGION] confirm with effect '{effect_type}' -> rect={rect}"
             if self._debug_last_event != msg:
                 print(msg)
                 self._debug_last_event = msg
             self.reset()
-            return rect
+            return (rect, effect_type)
         return None
 
+    # Devuelve (ancla, candidato) actuales para previsualizar el rectángulo de selección.
     def preview(self) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
         return self.anchor, self.candidate
 

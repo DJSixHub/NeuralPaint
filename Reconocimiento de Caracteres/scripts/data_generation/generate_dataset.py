@@ -1,8 +1,3 @@
-"""
-Synthetic dataset generator with anti-aliasing preservation via supersampling.
-Generates images, masks, and binary .pt files for fast training.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -17,11 +12,11 @@ from tqdm import tqdm
 from fontTools.ttLib import TTFont
 
 
-# ============================================================================
-# CONFIGURATION - All tunable parameters
-# ============================================================================
+# ================================================================================================
+# CONFIGURACIÓN - Parámetros ajustables
+# ================================================================================================
 
-CHARSET = (
+CHARSET = ( # conjunto de caracteres para generación sintética
     "0123456789"
     + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     + "abcdefghijklmnopqrstuvwxyz"
@@ -37,14 +32,12 @@ CHARSET = (
     + "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ᵃⁿᵐᵏᵗ"
 )
 
-# Font sizes optimized for anti-aliasing (emphasis on small fonts 4-12pt)
-FONT_SIZES = [4, 6, 8, 10, 12, 14, 16, 18, 20, 25, 30, 34, 48, 96]
-FONT_SIZE_WEIGHTS = [20, 30, 40, 40, 30, 15, 12, 10, 5, 4, 3, 2, 1, 1]
+FONT_SIZES = [4, 6, 8, 10, 12, 14, 16, 18, 20, 25, 30, 34, 48, 96] # tamaños de fuente optimizados para antialiasing (énfasis en fuentes pequeñas 4-12pt)
+FONT_SIZE_WEIGHTS = [20, 30, 40, 40, 30, 15, 12, 10, 5, 4, 3, 2, 1, 1] # pesos de probabilidad para cada tamaño
 
-# Image dimensions (fixed for neural network)
-IMAGE_SIZE = 256  # All images are 256x256
+IMAGE_SIZE = 256 # tamaño fijo de imagen para red neuronal (256x256)
 
-# Text generation parameters
+# parámetros de generación de texto
 MIN_CHARS = 2
 MAX_CHARS = 12
 MIN_LINES = 3
@@ -52,8 +45,7 @@ MAX_LINES = 8
 MIN_CHARS_PER_LINE = 15
 MAX_CHARS_PER_LINE = 35
 
-# Background palettes
-BG_PALETTES = {
+BG_PALETTES = { # paletas de colores de fondo
     "white": [(255, 255, 255), (250, 250, 250), (245, 245, 245)],
     "gray": [(245, 245, 245), (230, 230, 230), (200, 200, 200), (180, 180, 180)],
     "beige": [(250, 245, 235), (240, 230, 210), (235, 225, 200)],
@@ -61,16 +53,15 @@ BG_PALETTES = {
     "black": [(40, 40, 40), (20, 20, 20), (0, 0, 0)],
 }
 
-# Supersampling for anti-aliasing
-SUPERSAMPLE_FACTOR = 2
+SUPERSAMPLE_FACTOR = 2 # factor de sobremuestreo para preservar antialiasing
 
 
-# ============================================================================
-# Helper Functions
-# ============================================================================
+# ================================================================================================
+# FUNCIONES AUXILIARES
+# ================================================================================================
 
+# get_font carga una fuente con cache para evitar recargas repetidas
 def get_font(font_path: Path, size: int, cache: dict) -> ImageFont.FreeTypeFont:
-    """Load font with caching."""
     key = (str(font_path), int(size))
     if key not in cache:
         try:
@@ -80,11 +71,8 @@ def get_font(font_path: Path, size: int, cache: dict) -> ImageFont.FreeTypeFont:
     return cache[key]
 
 
+# font_supports_text verifica si una fuente puede renderizar todos los caracteres del texto sin fallback
 def font_supports_text(font_path: Path, text: str, font_cache: dict) -> bool:
-    """
-    Check if font can render all characters in text without fallback.
-    Uses fontTools to check the font's actual character map.
-    """
     try:
         # Check if we've already analyzed this font
         cache_key = f"_cmap_{font_path}"
@@ -143,19 +131,19 @@ def filter_compatible_fonts_fast(text: str, char_to_fonts: dict) -> list[Path]:
 
 
 def luminance(rgb: tuple[int, int, int]) -> float:
-    """Calculate relative luminance (0-1)."""
+    # Calcula la luminancia relativa (0-1).
     r, g, b = [c / 255.0 for c in rgb]
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
 def random_bg_color() -> tuple[int, int, int]:
-    """Pick random background color from palettes."""
+    # Elige un color de fondo aleatorio de las paletas.
     palette = random.choice(list(BG_PALETTES.values()))
     return random.choice(palette)
 
 
 def random_text_color(bg_color: tuple[int, int, int]) -> tuple[int, int, int]:
-    """Pick text color with good contrast against background."""
+    # Elige color de texto con buen contraste frente al fondo.
     bg_lum = luminance(bg_color)
     if bg_lum > 0.5:  # Light background
         return (0, 0, 0) if random.random() < 0.9 else (50, 50, 50)
@@ -164,7 +152,7 @@ def random_text_color(bg_color: tuple[int, int, int]) -> tuple[int, int, int]:
 
 
 def add_noise(image: Image.Image, strength: float = 0.1) -> Image.Image:
-    """Add gaussian noise to image."""
+    # Añade ruido gaussiano a la imagen.
     arr = np.array(image, dtype=np.float32)
     noise = np.random.normal(0, strength * 255, arr.shape)
     arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
@@ -183,17 +171,7 @@ def render_text_with_antialiasing(
     font_cache: dict,
     layout: str = "centered",
 ) -> tuple[Image.Image, Image.Image]:
-    """
-    Render text with anti-aliasing preservation via supersampling.
-    Always renders to 256x256 canvas.
-    
-    Args:
-        layout: "full_width", "full_height", or "centered"
-    
-    Returns:
-        - char_img: RGBA image with rendered text (256x256)
-        - mask: Grayscale mask with anti-aliasing (256x256, 0-255)
-    """
+    # Renderiza texto a 256x256 preservando anti-aliasing vía supermuestreo.
     canvas_w = canvas_h = IMAGE_SIZE
     
     # Render at higher resolution
@@ -259,31 +237,105 @@ def generate_sample(
     font_cache: dict,
     layout: str = "centered",
 ) -> tuple[Image.Image, Image.Image]:
-    """
-    Generate a single 256x256 training sample.
-    
-    Returns:
-        - composed: RGB image with text on background (256x256)
-        - mask: Grayscale mask with anti-aliasing (256x256)
-    """
-    # Render text with anti-aliasing (always 256x256)
+    # Genera un sample 256x256 con texto y su máscara AA.
+    # Render de texto con anti-aliasing (siempre 256x256).
     char_img, mask = render_text_with_antialiasing(
         text, font_path, font_size, text_color, font_cache, layout
     )
     
-    # Create background (256x256)
+    # Crea fondo 256x256.
     bg = Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE), bg_color)
     
-    # Composite text onto background
+    # Compone texto sobre el fondo.
     composed = bg.copy()
     composed.paste(char_img, mask=char_img.split()[3])
     
-    # Optional: add noise/blur for realism
+    # Opcional: añade ruido/desenfoque para realismo.
     if random.random() < 0.3:
         composed = add_noise(composed, strength=random.uniform(0.02, 0.12))
         composed = composed.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.0, 0.8)))
     
     return composed, mask
+
+
+def generate_negative_sample(bg_color: tuple[int, int, int]) -> tuple[Image.Image, Image.Image]:
+    # Genera sample negativo con bordes fuertes pero sin texto (máscara vacía).
+    img = Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE), bg_color)
+    draw = ImageDraw.Draw(img)
+    
+    # Escoge tipo de muestra negativa.
+    sample_type = random.choice([
+        "rectangles",      # Bordes rectangulares fuertes
+        "circles",         # Bordes circulares
+        "lines",           # Líneas diagonales/horizontales/verticales
+        "gradients",       # Transiciones de gradiente fuertes
+        "noise_patterns",  # Ruido aleatorio con bordes
+    ])
+    
+    if sample_type == "rectangles":
+        # Dibuja 3-8 rectángulos con bordes marcados.
+        num_rects = random.randint(3, 8)
+        for _ in range(num_rects):
+            x1 = random.randint(0, IMAGE_SIZE - 20)
+            y1 = random.randint(0, IMAGE_SIZE - 20)
+            x2 = x1 + random.randint(20, 80)
+            y2 = y1 + random.randint(20, 80)
+            color = tuple(random.randint(0, 255) for _ in range(3))
+            draw.rectangle([x1, y1, x2, y2], fill=color, outline=None)
+    
+    elif sample_type == "circles":
+        # Dibuja 3-8 círculos aleatorios.
+        num_circles = random.randint(3, 8)
+        for _ in range(num_circles):
+            x = random.randint(20, IMAGE_SIZE - 20)
+            y = random.randint(20, IMAGE_SIZE - 20)
+            r = random.randint(10, 40)
+            color = tuple(random.randint(0, 255) for _ in range(3))
+            draw.ellipse([x-r, y-r, x+r, y+r], fill=color, outline=None)
+    
+    elif sample_type == "lines":
+        # Dibuja 5-15 líneas aleatorias con grosor variable.
+        num_lines = random.randint(5, 15)
+        for _ in range(num_lines):
+            x1 = random.randint(0, IMAGE_SIZE)
+            y1 = random.randint(0, IMAGE_SIZE)
+            x2 = random.randint(0, IMAGE_SIZE)
+            y2 = random.randint(0, IMAGE_SIZE)
+            color = tuple(random.randint(0, 255) for _ in range(3))
+            width = random.randint(1, 5)
+            draw.line([x1, y1, x2, y2], fill=color, width=width)
+    
+    elif sample_type == "gradients":
+        # Create strong gradient transitions
+        arr = np.array(img)
+        # Random gradient direction
+        if random.random() < 0.5:
+            # Horizontal gradient
+            gradient = np.linspace(0, 255, IMAGE_SIZE, dtype=np.uint8)
+            for i in range(3):  # RGB channels
+                arr[:, :, i] = gradient[np.newaxis, :]
+        else:
+            # Vertical gradient
+            gradient = np.linspace(0, 255, IMAGE_SIZE, dtype=np.uint8)
+            for i in range(3):
+                arr[:, :, i] = gradient[:, np.newaxis]
+        img = Image.fromarray(arr)
+    
+    else:  # noise_patterns
+        # Random noise with strong edges
+        arr = np.random.randint(0, 256, (IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.uint8)
+        img = Image.fromarray(arr)
+        # Add some structure with blur
+        img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(1.0, 3.0)))
+    
+    # Add noise for realism
+    if random.random() < 0.5:
+        img = add_noise(img, strength=random.uniform(0.05, 0.15))
+    
+    # Empty mask (no text)
+    mask = Image.new("L", (IMAGE_SIZE, IMAGE_SIZE), 0)
+    
+    return img, mask
 
 
 # ============================================================================
@@ -352,6 +404,7 @@ def generate_dataset(
     charset: str = CHARSET,
     single_ratio: float = 0.05,
     seed: int = 42,
+    fine_tune_mode: bool = False,
 ) -> None:
     """
     Generate synthetic dataset with anti-aliasing.
@@ -363,6 +416,7 @@ def generate_dataset(
         charset: Characters to use
         single_ratio: Probability of single-character samples
         seed: Random seed for reproducibility
+        fine_tune_mode: If True, generate 70% normal + 30% negative samples (Stage 2)
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -412,36 +466,56 @@ def generate_dataset(
     attempts = 0
     max_attempts = num_samples * 3  # Allow retries for empty masks
     
+    # Stage 2 fine-tuning: 70% normal text samples + 30% negative samples
+    num_text_samples = int(num_samples * 0.7) if fine_tune_mode else num_samples
+    num_negative_samples = num_samples - num_text_samples if fine_tune_mode else 0
+    
+    print(f"Mode: {'Fine-tune (Stage 2)' if fine_tune_mode else 'Stage 1'}")
+    if fine_tune_mode:
+        print(f"  - Text samples (70%): {num_text_samples}")
+        print(f"  - Negative samples (30%): {num_negative_samples}")
+    
     with tqdm(total=num_samples, desc="Generating") as pbar:
         while generated < num_samples and attempts < max_attempts:
             attempts += 1
             
-            # Generate text first
-            font_size = random.choices(FONT_SIZES, weights=FONT_SIZE_WEIGHTS)[0]
-            text, layout = generate_text(charset, single_ratio)
+            # Decide sample type
+            is_negative = fine_tune_mode and generated >= num_text_samples
             
-            # Filter fonts that support all characters in text (fast lookup)
-            compatible_fonts = filter_compatible_fonts_fast(text, char_to_fonts)
-            
-            # Skip if no fonts support this text (shouldn't happen with proper charset)
-            if not compatible_fonts:
-                continue
-            
-            # Pick compatible font
-            font_path = random.choice(compatible_fonts)
-            bg_color = random_bg_color()
-            text_color = random_text_color(bg_color)
-            
-            # Generate sample (always 256x256)
-            image, mask = generate_sample(
-                text, font_path, font_size,
-                bg_color, text_color, font_cache, layout
-            )
-            
-            # Validate: skip if mask is empty (no characters rendered)
-            mask_np = np.array(mask, dtype=np.uint8)
-            if mask_np.max() < 10:  # Too faint or empty
-                continue
+            if is_negative:
+                # Generate negative sample (no text, empty mask)
+                bg_color = random_bg_color()
+                image, mask = generate_negative_sample(bg_color)
+                mask_np = np.array(mask, dtype=np.uint8)
+                sample_type = "negative"
+            else:
+                # Generate normal text sample
+                font_size = random.choices(FONT_SIZES, weights=FONT_SIZE_WEIGHTS)[0]
+                text, layout = generate_text(charset, single_ratio)
+                
+                # Filter fonts that support all characters in text (fast lookup)
+                compatible_fonts = filter_compatible_fonts_fast(text, char_to_fonts)
+                
+                # Skip if no fonts support this text (shouldn't happen with proper charset)
+                if not compatible_fonts:
+                    continue
+                
+                # Pick compatible font
+                font_path = random.choice(compatible_fonts)
+                bg_color = random_bg_color()
+                text_color = random_text_color(bg_color)
+                
+                # Generate sample (always 256x256)
+                image, mask = generate_sample(
+                    text, font_path, font_size,
+                    bg_color, text_color, font_cache, layout
+                )
+                
+                # Validate: skip if mask is empty (no characters rendered)
+                mask_np = np.array(mask, dtype=np.uint8)
+                if mask_np.max() < 10:  # Too faint or empty
+                    continue
+                sample_type = "text"
             
             generated += 1
             idx = generated
@@ -473,14 +547,24 @@ def generate_dataset(
                       bin_shard / bin_fname)
             
             # Metadata
-            metadata.append({
-                "file": f"{shard_name}/{fname}",
-                "text": text,
-                "font": font_path.stem,
-                "font_size": font_size,
-                "width": IMAGE_SIZE,
-                "height": IMAGE_SIZE,
-            })
+            if is_negative:
+                metadata.append({
+                    "file": f"{shard_name}/{fname}",
+                    "type": "negative",
+                    "text": "",
+                    "width": IMAGE_SIZE,
+                    "height": IMAGE_SIZE,
+                })
+            else:
+                metadata.append({
+                    "file": f"{shard_name}/{fname}",
+                    "type": "text",
+                    "text": text,
+                    "font": font_path.stem,
+                    "font_size": font_size,
+                    "width": IMAGE_SIZE,
+                    "height": IMAGE_SIZE,
+                })
             
             pbar.update(1)
     
@@ -524,6 +608,10 @@ def main():
         '--seed', type=int, default=42,
         help='Random seed'
     )
+    parser.add_argument(
+        '--fine-tune', action='store_true',
+        help='Stage 2 mode: generate 70%% text + 30%% negative samples (no text, strong edges)'
+    )
     
     args = parser.parse_args()
     
@@ -533,6 +621,7 @@ def main():
         num_samples=args.num_samples,
         single_ratio=args.single_ratio,
         seed=args.seed,
+        fine_tune_mode=args.fine_tune,
     )
 
 

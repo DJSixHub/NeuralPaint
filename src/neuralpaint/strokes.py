@@ -192,6 +192,7 @@ class StrokeCanvas:
     # Self-intersection detection and inscribed rectangle extraction
     # ------------------------------------------------------------------
     @staticmethod
+    # Calcula si dos segmentos se cruzan y devuelve (intersecta, x, y).
     def _segments_intersect(a0, a1, b0, b1):
         # Return (intersect, x, y) using parametric intersection
         (x1, y1), (x2, y2) = a0, a1
@@ -209,14 +210,8 @@ class StrokeCanvas:
             return (True, px, py)
         return (False, 0.0, 0.0)
 
+    # Detecta auto-intersección en el último trazo y devuelve un rectángulo inscrito o None.
     def detect_self_intersection_inscribed_rect(self) -> Tuple[int, int, int, int] | None:
-        """Detecta auto-intersección en el trazo actual y devuelve un rect (x,y,w,h) inscrito.
-
-        Algoritmo:
-          - busca la primera intersección entre segmentos no adyacentes del último trazo
-          - construye el polígono cerrado entre los índices y rasteriza la máscara
-          - toma el bounding box y lo reduce hasta quedar totalmente dentro de la máscara
-        """
         if not self.strokes:
             return None
         stroke = self.strokes[-1]

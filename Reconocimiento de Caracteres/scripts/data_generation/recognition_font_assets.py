@@ -1,18 +1,21 @@
-# Script para descargar fuentes populares usadas en editores, IDEs y textos academicos.
 from __future__ import annotations
 
 import argparse
 import shutil
 import time
+import zipfile
 from pathlib import Path
 from typing import Dict, Iterable, List
 
 import requests
 from tqdm import tqdm
 
-import zipfile
 
-# FONT_SOURCES define nombre, url y sugerencia de subcarpeta destino.
+# ================================================================================================
+# CONFIGURACIÓN DE FUENTES
+# ================================================================================================
+
+# FONT_SOURCES define nombre, url y extension de cada fuente a descargar
 FONT_SOURCES: List[Dict[str, str]] = [
     {"name": "JetBrainsMono", "url": "https://download.jetbrains.com/fonts/JetBrainsMono-2.304.zip", "extension": ".zip"},
     {"name": "FiraCode", "url": "https://github.com/tonsky/FiraCode/releases/download/6.2/Fira_Code_v6.2.zip", "extension": ".zip"},
@@ -57,7 +60,11 @@ FONT_SOURCES: List[Dict[str, str]] = [
 ]
 
 
-# get_filename deduce el nombre final basado en la URL.
+# ================================================================================================
+# FUNCIONES AUXILIARES PARA DESCARGA Y EXTRACCIÓN
+# ================================================================================================
+
+# get_filename deduce el nombre del archivo a partir de la URL
 def get_filename(url: str) -> str:
     filename = url.split("/")[-1]
     if "?" in filename:
@@ -65,53 +72,52 @@ def get_filename(url: str) -> str:
     return filename
 
 
-# ensure_directories crea las carpetas necesarias.
+# ensure_directories crea las carpetas necesarias para descargas y extracción
 def ensure_directories(base_dir: Path) -> Dict[str, Path]:
-    downloads = base_dir / "downloads"
-    extracted = base_dir / "extracted"
+    downloads = base_dir / "downloads" # carpeta temporal para archivos descargados
+    extracted = base_dir / "extracted" # carpeta final para fuentes extraídas
     downloads.mkdir(parents=True, exist_ok=True)
     extracted.mkdir(parents=True, exist_ok=True)
     return {"downloads": downloads, "extracted": extracted}
 
 
-# stream_download guarda la respuesta manejando reanudaciones simples.
-def stream_download(url: str, target: Path, retries: int = 4, timeout: int = 30) -> None:
-    temp_path = target.with_suffix(target.suffix + ".part")
-    chunk_size = 1024 * 256
+# stream_download descarga un archivo con soporte para reanudación y manejo de errores
+def stream_download(url: str, target: Path, retries: int = 4, timeout: int = 30) -> None: # máximo 4 intentos con timeout de 30s
+    temp_path = target.with_suffix(target.suffix + ".part") # archivo temporal durante descarga
+    chunk_size = 1024 * 256 # 256 KB por fragmento
     for attempt in range(1, retries + 1):
-        resume_from = temp_path.stat().st_size if temp_path.exists() else 0
-        headers = {"Range": f"bytes={resume_from}-"} if resume_from else None
+        resume_from = temp_path.stat().st_size if temp_path.exists() else 0 # bytes ya descargados
+        headers = {"Range": f"bytes={resume_from}-"} if resume_from else None # header para reanudación
         try:
             with requests.get(url, stream=True, timeout=timeout, headers=headers) as response:
-                # Manejo de errores HTTP explícitos
-                if response.status_code == 404:
+                if response.status_code == 404: # archivo no encontrado
                     print(f"ERROR 404: No encontrado: {url}")
                     if temp_path.exists():
                         temp_path.unlink()
                     return
-                if response.status_code == 403:
+                if response.status_code == 403: # acceso prohibido
                     print(f"ERROR 403: Acceso prohibido: {url}")
                     if temp_path.exists():
                         temp_path.unlink()
                     return
-                if 400 <= response.status_code < 600 and response.status_code not in (200, 206):
+                if 400 <= response.status_code < 600 and response.status_code not in (200, 206): # error HTTP genérico
                     print(f"ERROR HTTP {response.status_code}: {url}")
                     if temp_path.exists():
                         temp_path.unlink()
                     return
-                if resume_from and response.status_code == 416:
+                if resume_from and response.status_code == 416: # rango no satisfecho, reiniciar descarga
                     temp_path.unlink(missing_ok=True)
                     resume_from = 0
                     continue
-                if resume_from and response.status_code == 200:
+                if resume_from and response.status_code == 200: # servidor no soporta reanudación, reiniciar
                     temp_path.unlink(missing_ok=True)
                     resume_from = 0
                     continue
-                response.raise_for_status()
-                total_bytes = response.headers.get("Content-Length")
+                response.raise_for_status() # lanzar excepción si hay otros errores HTTP
+                total_bytes = response.headers.get("Content-Length") # tamaño total del archivo
                 if total_bytes is not None:
                     total_bytes = int(total_bytes) + (resume_from if response.status_code == 206 else 0)
-                mode = "ab" if resume_from else "wb"
+                mode = "ab" if resume_from else "wb" # append si hay reanudación, write si es nuevo
                 with open(temp_path, mode) as file_obj, tqdm(
                     total=total_bytes,
                     unit="B",
@@ -124,9 +130,9 @@ def stream_download(url: str, target: Path, retries: int = 4, timeout: int = 30)
                             continue
                         file_obj.write(chunk)
                         progress.update(len(chunk))
-            if target.exists():
+            if target.exists(): # eliminar archivo final previo si existe
                 target.unlink()
-            temp_path.rename(target)
+            temp_path.rename(target) # renombrar archivo temporal a nombre final
             return
         except requests.exceptions.Timeout:
             print(f"Timeout (espera agotada) en intento {attempt}/{retries} para {url}")
@@ -134,34 +140,38 @@ def stream_download(url: str, target: Path, retries: int = 4, timeout: int = 30)
             print(f"Error de conexión en intento {attempt}/{retries} para {url}: {exc}")
         except requests.exceptions.RequestException as exc:
             print(f"Error inesperado en intento {attempt}/{retries} para {url}: {exc}")
-        if attempt == retries:
+        if attempt == retries: # tras agotar reintentos, eliminar archivo temporal y abortar
             if temp_path.exists():
                 temp_path.unlink()
             print(f"Descarga fallida tras {retries} intentos: {url}")
             return
-        time.sleep(min(5 * attempt, 30))
+        time.sleep(min(5 * attempt, 30)) # espera progresiva entre reintentos
 
 
-# extract_zip descomprime el archivo zip si no fue extraido previamente.
+# extract_zip descomprime un archivo ZIP si no fue extraído previamente
 def extract_zip(archive_path: Path, target_dir: Path) -> None:
-    marker = target_dir / ".extracted"
+    marker = target_dir / ".extracted" # archivo marcador para evitar re-extraer
     if marker.exists():
         return
     with zipfile.ZipFile(archive_path, "r") as zipper:
         zipper.extractall(target_dir)
-    marker.touch()
+    marker.touch() # crear marcador tras extracción exitosa
 
 
-# copy_single_font copia archivos individuales ttf al directorio destino.
+# copy_single_font copia un archivo de fuente individual al directorio destino
 def copy_single_font(source: Path, target_dir: Path) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
     destination = target_dir / source.name
-    if destination.exists():
+    if destination.exists(): # no sobrescribir si ya existe
         return
     shutil.copy2(source, destination)
 
 
-# download_all procesa la lista completa respetando archivos ya existentes.
+# ================================================================================================
+# LÓGICA PRINCIPAL DE DESCARGA
+# ================================================================================================
+
+# download_all procesa la lista completa de fuentes respetando archivos ya existentes
 def download_all(fonts: Iterable[Dict[str, str]], base_dir: Path) -> None:
     dirs = ensure_directories(base_dir)
     for entry in fonts:
@@ -173,43 +183,47 @@ def download_all(fonts: Iterable[Dict[str, str]], base_dir: Path) -> None:
             filename = f"{filename}{extension}"
         download_path = dirs["downloads"] / filename
         extract_dir = dirs["extracted"] / name
-        if extract_dir.exists():
+        if extract_dir.exists(): # si ya fue extraído previamente, omitir
             print(f"{name}: ya extraido, se omite")
             continue
-        if not download_path.exists():
+        if not download_path.exists(): # descargar si no existe
             print(f"{name}: descargando {url}")
             stream_download(url, download_path)
         else:
             print(f"{name}: descarga existente, se omite")
-        if not download_path.exists():
+        if not download_path.exists(): # si la descarga falló, omitir extracción
             print(f"{name}: descarga fallida, se omite extracción")
             continue
-        if download_path.suffix.lower() == ".zip":
+        if download_path.suffix.lower() == ".zip": # extraer archivo ZIP
             extract_dir.mkdir(parents=True, exist_ok=True)
             extract_zip(download_path, extract_dir)
-        else:
+        else: # copiar archivo de fuente individual
             extract_dir.mkdir(parents=True, exist_ok=True)
             copy_single_font(download_path, extract_dir)
 
 
-# build_argument_parser define CLI sencillo para indicar carpeta destino.
+# ================================================================================================
+# INTERFAZ DE LÍNEA DE COMANDOS
+# ================================================================================================
+
+# build_argument_parser define la interfaz CLI para especificar carpeta destino
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Descarga fuentes populares para reconocimiento de caracteres.")
     parser.add_argument(
         "--dest",
         type=Path,
         default=Path("assets/fonts"),
-        help="Carpeta base donde se almacenaran las fuentes descargadas.",
+        help="Carpeta base donde se almacenarán las fuentes descargadas.",
     )
     return parser
 
 
-# main ejecuta la descarga basada en los argumentos proporcionados.
+# main ejecuta el proceso de descarga basado en los argumentos CLI
 def main() -> None:
     parser = build_argument_parser()
     args = parser.parse_args()
     download_all(FONT_SOURCES, args.dest)
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     main()

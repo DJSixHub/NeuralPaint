@@ -70,6 +70,23 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Forzar EasyOCR en CPU (por defecto usa GPU si está disponible).",
     )
+    parser.add_argument(
+        "--dual-monitor",
+        action="store_true",
+        help="Habilitar modo de dos monitores: UI en monitor principal, canvas en proyector.",
+    )
+    parser.add_argument(
+        "--main-monitor",
+        type=int,
+        default=0,
+        help="Índice del monitor principal para UI (por defecto 0).",
+    )
+    parser.add_argument(
+        "--projector-monitor",
+        type=int,
+        default=1,
+        help="Índice del monitor proyector para canvas solamente (por defecto 1).",
+    )
     return parser.parse_args(argv)
 
 

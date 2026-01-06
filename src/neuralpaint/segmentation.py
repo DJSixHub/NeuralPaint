@@ -17,8 +17,9 @@ import torch.nn as nn
 from .gestures import is_index_finger_up
 
 
-# Neural refinement network classes
+# Bloque de dos convoluciones ReLU para el U-Net de refinamiento.
 class DoubleConv(nn.Module):
+    # Inicializa el bloque de dos convs 3x3 con ReLU.
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.net = nn.Sequential(
@@ -28,16 +29,14 @@ class DoubleConv(nn.Module):
             nn.ReLU(inplace=True),
         )
 
+    # Aplica las dos convoluciones consecutivas.
     def forward(self, x):
         return self.net(x)
 
 
+# U-Net liviano para refinar máscaras (binary -> suavizada con anti-aliasing).
 class RefinementUNet(nn.Module):
-    """Lightweight U-Net for mask refinement: binary mask -> smooth mask.
-    
-    Input:  1-channel binary/rough mask
-    Output: 1-channel smooth mask with anti-aliasing
-    """
+    # Construye encoder/decoder de 3 niveles para refinar máscaras.
     def __init__(self, base: int = 12):
         super().__init__()
         # Encoder
@@ -55,6 +54,7 @@ class RefinementUNet(nn.Module):
 
         self.outc = nn.Conv2d(base, 1, kernel_size=1)
 
+    # Ejecuta la pasada hacia adelante del U-Net de refinamiento.
     def forward(self, x):
         e1 = self.enc1(x)
         p1 = self.pool1(e1)
@@ -72,7 +72,7 @@ class RefinementUNet(nn.Module):
 
         return self.outc(d1)
 
-
+# Estado interno del selector de región (ancla, candidato y progreso de confirmación).
 @dataclass
 class SelectionState:
     active: bool = False
@@ -83,31 +83,30 @@ class SelectionState:
 
 
 class RegionSelector:
-    """Selector visual que usa el índice hacia arriba para entrar en modo selección.
-
-    - `start_on_gesture`: when True, caller should call `try_start(hand_landmarks, pointer)`
-      frequently; selector will activate when `is_index_finger_up` is True.
-    - `update(pointer)` updates candidate and returns rect (x,y,w,h) when committed.
-    """
+    # Selector visual que arranca con índice arriba y confirma tras mantener puntero estable.
 
     def __init__(self, hold_time: float = 3.0, move_threshold: float = 8.0) -> None:
         self.hold_time = float(hold_time)
         self.move_threshold = float(move_threshold)
         self._state = SelectionState()
 
+    # Resetea el estado de selección.
     def reset(self) -> None:
         self._state = SelectionState()
 
+    # Indica si el selector está activo.
     def is_active(self) -> bool:
         return self._state.active
 
+    # Devuelve (ancla, candidato, progreso) para previsualización.
     def get_preview(self) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]], float]:
         return self._state.anchor, self._state.candidate, self._state.progress
 
+    # Intenta iniciar selección si hay puntero y el índice está arriba (o sin landmarks).
     def try_start(self, hand_landmarks, pointer: Optional[Tuple[int, int]]) -> bool:
         if pointer is None:
             return False
-        # allow starting selection even if we don't have hand landmarks (gesture hand already triggered)
+        # Permite iniciar selección aunque falten landmarks de la mano (gesto ya confirmado).
         if hand_landmarks is None or is_index_finger_up(hand_landmarks):
             self._state.active = True
             self._state.anchor = (int(pointer[0]), int(pointer[1]))
@@ -117,6 +116,7 @@ class RegionSelector:
             return True
         return False
 
+    # Actualiza candidato y confirma rectángulo tras mantener estable el puntero.
     def update(self, pointer: Optional[Tuple[int, int]], now: Optional[float] = None) -> Optional[Tuple[int, int, int, int]]:
         if not self._state.active:
             return None
@@ -164,6 +164,7 @@ class RegionSelector:
         return None
 
 
+# Refina una máscara binaria eliminando halo y aplicando suavizado interno agresivo.
 def refine_mask(
     binary_mask: np.ndarray,
     erode_iter: int = 3,
@@ -173,78 +174,52 @@ def refine_mask(
     interior_smooth_depth: int = 6,
     edge_blur_sigma: float = 2.5,
 ) -> np.ndarray:
-    """Refine a binary mask by removing halo and applying aggressive inward smoothing.
-    
-    The network captures blur/aliasing/halo as part of characters, making them rough.
-    This function:
-    1. Aggressively erodes to remove the thick captured halo
-    2. Applies strong inward blur/anti-aliasing from the edge into the character interior
-    3. Creates smooth gradients that mimic font rendering anti-aliasing
-    
-    Args:
-        binary_mask: Binary mask (0=background, 255=character) with thick halo from network
-        erode_iter: Number of erosion iterations to remove captured halo (default 3, more aggressive)
-        open_kernel_size: Kernel size for separating merged strokes (default 3)
-        dilate_iter: Dilation iterations to restore thickness (default 1)
-        blur_kernel_size: Gaussian blur kernel for anti-aliasing (default 9, must be odd)
-        interior_smooth_depth: Pixels from edge to smooth inward (default 6, more aggressive)
-        edge_blur_sigma: Gaussian blur sigma for edge smoothing (default 2.5, stronger)
-    
-    Returns:
-        Refined mask with smooth inward gradients (grayscale 0-255, not binary)
-    """
     if binary_mask.size == 0:
         return binary_mask
     
-    # 1. AGGRESSIVE EROSION: Remove the thick halo captured by the network
-    # Use more iterations to strip away the blur/aliasing that was classified as character
+    # 1. Erosión agresiva para quitar halo grueso detectado por la red.
     kernel_erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask_thin = cv2.erode(binary_mask, kernel_erode, iterations=erode_iter)
     
-    # 2. Morphological opening to separate merged strokes
+    # 2. Apertura morfológica para separar trazos pegados.
     kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_kernel_size, open_kernel_size))
     mask_separated = cv2.morphologyEx(mask_thin, cv2.MORPH_OPEN, kernel_open)
     
-    # 3. Slight dilation to restore base thickness
+    # 3. Ligera dilatación para recuperar grosor base.
     kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask_base = cv2.dilate(mask_separated, kernel_dilate, iterations=dilate_iter)
     
-    # 4. AGGRESSIVE INWARD SMOOTHING: Apply blur from character edge inward
-    # This recreates the natural font anti-aliasing that was wrongly included in the mask
+    # 4. Suavizado hacia adentro: aplica blur desde el borde hacia el interior.
     
-    # Distance transform: distance of each white pixel from the nearest background pixel
+    # Transformada de distancia para saber qué tan profundo está cada píxel.
     dist_transform = cv2.distanceTransform(mask_base, cv2.DIST_L2, 5)
     
-    # Apply strong Gaussian blur to create smooth gradients
+    # Blur Gaussiano fuerte para gradientes suaves.
     blur_k = blur_kernel_size if blur_kernel_size % 2 == 1 else blur_kernel_size + 1
     mask_blurred = cv2.GaussianBlur(mask_base.astype(np.float32), (blur_k, blur_k), edge_blur_sigma)
     
-    # Create gradient falloff from edge inward
-    # Pixels at the edge get maximum blur, deep interior pixels stay solid
+    # Gradiente de caída desde el borde hacia adentro.
     edge_proximity = np.clip(dist_transform, 0, interior_smooth_depth) / interior_smooth_depth
-    # Invert: 1.0 at edge (full blur), 0.0 deep inside (no blur)
+    # Invertir: 1.0 en borde (máximo blur), 0.0 en interior.
     blur_weight = 1.0 - edge_proximity
     
-    # Blend: smoothly transition from blurred edge to solid interior
+    # Mezcla: transición suave de borde borroso a interior sólido.
     mask_base_f = mask_base.astype(np.float32)
     mask_smooth = blur_weight * mask_blurred + (1.0 - blur_weight) * mask_base_f
     
-    # Apply additional bilateral filter for even smoother edges while preserving structure
-    # Bilateral filter smooths while preserving edges - perfect for anti-aliasing
+    # Filtro bilateral adicional para suavizar sin perder bordes.
     mask_smooth_uint8 = np.clip(mask_smooth, 0, 255).astype(np.uint8)
     mask_bilateral = cv2.bilateralFilter(mask_smooth_uint8, d=9, sigmaColor=75, sigmaSpace=75)
     
-    # Final gentle Gaussian blur to create soft halo effect (like subpixel rendering)
+    # Blur Gaussiano final suave para efecto de halo.
     mask_final = cv2.GaussianBlur(mask_bilateral.astype(np.float32), (7, 7), 1.0)
     mask_final = np.clip(mask_final, 0, 255).astype(np.uint8)
     
-    # 5. Remove tiny noise (but keep grayscale for anti-aliasing)
-    # Use connected components to remove small isolated regions
-    # First threshold to find components
+    # 5. Quita ruido pequeño usando componentes conectados.
     _, binary_temp = cv2.threshold(mask_final, 30, 255, cv2.THRESH_BINARY)
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_temp, connectivity=8)
     
-    # Keep only components larger than minimum size
+    # Conserva solo componentes grandes; copia valores originales para mantener escala de grises.
     min_component_size = 20  # pixels
     mask_cleaned = np.zeros_like(mask_final)
     for i in range(1, num_labels):  # Skip background (label 0)
@@ -255,34 +230,25 @@ def refine_mask(
     return mask_cleaned
 
 
+# Refina una máscara con el modelo U-Net de anti-aliasing si está disponible.
 def refine_mask_neural(
     mask: np.ndarray,
     model: RefinementUNet,
     device: torch.device
 ) -> np.ndarray:
-    """Apply neural network refinement to add natural anti-aliasing.
-    
-    Args:
-        mask: Input mask (grayscale, 0-255)
-        model: Trained refinement network
-        device: torch device (cuda/cpu)
-    
-    Returns:
-        Refined mask with neural anti-aliasing (grayscale, 0-255)
-    """
     if mask.size == 0:
         return mask
     
-    # Prepare input tensor
+    # Prepara tensor de entrada.
     mask_t = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).float() / 255.0
     mask_t = mask_t.to(device)
     
-    # Run inference
+    # Inferencia.
     with torch.no_grad():
         refined_t = model(mask_t)
         refined_t = torch.sigmoid(refined_t)  # Ensure [0, 1] range
     
-    # Convert back to numpy
+    # Convierte de vuelta a numpy en 0-255.
     refined = refined_t.squeeze().cpu().numpy()
     refined = (refined * 255.0).clip(0, 255).astype(np.uint8)
     
@@ -290,11 +256,7 @@ def refine_mask_neural(
 
 
 class Segmenter:
-    """Wrapper that runs `Reconocimiento de Caracteres/scripts/inference/testing.py` on a single image patch.
-
-    Uses checkpoint at `Reconocimiento de Caracteres/models/segmentation/checkpoint_epoch_70.pth` by default.
-    Also applies neural refinement network for smooth anti-aliasing.
-    """
+    # Ejecuta testing.py sobre un patch y aplica refinamiento (morfológico o neural).
 
     def __init__(
         self,
@@ -303,7 +265,7 @@ class Segmenter:
         use_neural_refinement: bool = True
     ) -> None:
         if checkpoint_path is None:
-            checkpoint_path = os.path.join("Reconocimiento de Caracteres", "models", "segmentation", "checkpoint_epoch_70.pth")
+            checkpoint_path = os.path.join("Reconocimiento de Caracteres", "models", "segmentation", "fine_tuning_checkpoint_epoch_10.pth")
         self.checkpoint = str(checkpoint_path)
         
         # Load refinement network if enabled
@@ -334,6 +296,7 @@ class Segmenter:
                 print("[SEG] Will use morphological refinement only")
                 self.refinement_model = None
 
+    # Corre segmentación sobre un patch BGR y devuelve máscara (grayscale) y ruta guardada (opcional).
     def run_on_patch(self, patch_bgr: np.ndarray) -> Tuple[np.ndarray, Optional[str]]:
         print(f"[SEG] run_on_patch start: patch_shape={getattr(patch_bgr, 'shape', None)}")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -368,9 +331,9 @@ class Segmenter:
             except Exception as e:
                 print(f"[SEG] subprocess failed: {e}")
                 return np.zeros((patch_bgr.shape[0], patch_bgr.shape[1]), dtype=np.uint8), None
-            masks = glob.glob(os.path.join(out_dir, "*_mask.png"))
-            overlays = glob.glob(os.path.join(out_dir, "*_overlay.png"))
-            print(f"[SEG] produced files: masks={len(masks)} overlays={len(overlays)}")
+            # Updated testing.py saves files as *_output.png (raw network output, no overlay)
+            masks = glob.glob(os.path.join(out_dir, "*_output.png"))
+            print(f"[SEG] produced files: masks={len(masks)}")
             if not masks:
                 # return empty mask and no saved path
                 print("[SEG] no mask found in out_dir")
@@ -396,7 +359,7 @@ class Segmenter:
                 print(f"[SEG] failed saving produced mask: {e}")
                 out_path = None
 
-            # ensure mask is single-channel grayscale for binary thresholding
+            # ensure mask is single-channel grayscale (keep original 0-255 intensity for effects)
             if mask_raw.ndim == 3:
                 try:
                     mask_gray = cv2.cvtColor(mask_raw, cv2.COLOR_BGR2GRAY)
@@ -406,37 +369,43 @@ class Segmenter:
                 mask_gray = mask_raw
 
             if mask_gray.shape[0] != patch_bgr.shape[0] or mask_gray.shape[1] != patch_bgr.shape[1]:
-                mask_gray = cv2.resize(mask_gray, (patch_bgr.shape[1], patch_bgr.shape[0]), interpolation=cv2.INTER_NEAREST)
-            _, binary = cv2.threshold(mask_gray, 127, 255, cv2.THRESH_BINARY)
-            
-            # Refine the mask: aggressively remove captured halo and apply inward smoothing
-            print("[SEG] refining mask with aggressive morphological operations...")
-            binary_refined = refine_mask(
-                binary,
-                erode_iter=3,              # More aggressive halo removal
-                open_kernel_size=3,        # Separate merged strokes
-                dilate_iter=1,             # Restore base thickness
-                blur_kernel_size=9,        # Larger blur kernel for smoother anti-aliasing
-                interior_smooth_depth=6,   # Deep inward smoothing (6 pixels from edge)
-                edge_blur_sigma=2.5        # Strong blur sigma for soft edges
+                # Preserve gray levels / anti-aliasing when scaling
+                mask_gray = cv2.resize(mask_gray, (patch_bgr.shape[1], patch_bgr.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+            # For effects, return the raw network output (0-255). Do not threshold here.
+            print(
+                f"[SEG] using raw network output: shape={mask_gray.shape}, dtype={mask_gray.dtype}, non-zero pixels={np.count_nonzero(mask_gray)}"
             )
-            print(f"[SEG] morphological refinement complete: shape={binary_refined.shape}, dtype={binary_refined.dtype}")
+            
+            # Skip neural refinement as well - use raw mask for effects
+            # # Refine the mask: aggressively remove captured halo and apply inward smoothing
+            # print("[SEG] refining mask with aggressive morphological operations...")
+            # binary_refined = refine_mask(
+            #     binary,
+            #     erode_iter=3,              # More aggressive halo removal
+            #     open_kernel_size=3,        # Separate merged strokes
+            #     dilate_iter=1,             # Restore base thickness
+            #     blur_kernel_size=9,        # Larger blur kernel for smoother anti-aliasing
+            #     interior_smooth_depth=6,   # Deep inward smoothing (6 pixels from edge)
+            #     edge_blur_sigma=2.5        # Strong blur sigma for soft edges
+            # )
+            # print(f"[SEG] morphological refinement complete: shape={binary_refined.shape}, dtype={binary_refined.dtype}")
             
             # Apply neural refinement if available
-            if self.refinement_model is not None:
-                print("[SEG] applying neural anti-aliasing refinement...")
-                try:
-                    binary_refined = refine_mask_neural(
-                        binary_refined,
-                        self.refinement_model,
-                        self.refinement_device
-                    )
-                    print(f"[SEG] neural refinement complete: shape={binary_refined.shape}, dtype={binary_refined.dtype}")
-                except Exception as e:
-                    print(f"[SEG] neural refinement failed: {e}, using morphological result")
+            # if self.refinement_model is not None:
+            #     print("[SEG] applying neural anti-aliasing refinement...")
+            #     try:
+            #         binary_refined = refine_mask_neural(
+            #             binary_refined,
+            #             self.refinement_model,
+            #             self.refinement_device
+            #         )
+            #         print(f"[SEG] neural refinement complete: shape={binary_refined.shape}, dtype={binary_refined.dtype}")
+            #     except Exception as e:
+            #         print(f"[SEG] neural refinement failed: {e}, using morphological result")
 
             # try to load overlay image produced by the prediction script (original patch with mask overlay)
             overlay_img = None
-            # ignore overlay images from the script; return refined binary and path to produced file
+            # ignore overlay images from the script; return raw grayscale mask and path to produced file
             print("[SEG] run_on_patch complete")
-            return (binary_refined, out_path)
+            return (mask_gray, out_path)

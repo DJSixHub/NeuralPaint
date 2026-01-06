@@ -25,9 +25,10 @@ from .gestures import (
     extract_pointer_position,
     hand_index_point,
 )
-from .overlay import HAS_OVERLAY_SUPPORT, OverlayWindow, draw_status_banner
+from .overlay import HAS_OVERLAY_SUPPORT, OverlayWindow, draw_status_banner, enumerate_monitors
 from .recognition import RegionAnalyzer, RecognitionResult
 from .segmentation import Segmenter
+from .segmentation_options import apply_effect
 from .strokes import StrokeCanvas
 
 # MODE_LABELS mapea cada modo de interacción a una etiqueta en pantalla.
@@ -40,24 +41,27 @@ MODE_LABELS = {
 }
 
 
-# geom helpers (previously in utils.py)
+# Ajusta un punto a límites de ancho/alto de superficie.
 def clamp_point(point: Tuple[float, float], width: int, height: int) -> Tuple[int, int]:
     x = int(np.clip(point[0], 0, width - 1))
     y = int(np.clip(point[1], 0, height - 1))
     return x, y
 
 
+# Verifica si un punto está dentro de la superficie.
 def is_inside_surface(point: Tuple[float, float], width: int, height: int) -> bool:
     x, y = point
     return 0 <= x < width and 0 <= y < height
 
 
+# Proyecta un punto con la homografía dada.
 def project_point(homography: np.ndarray, xy: Tuple[float, float]) -> Tuple[float, float]:
     pts = np.array([[xy]], dtype=np.float32)
     warped = cv2.perspectiveTransform(pts, homography)
     return float(warped[0, 0, 0]), float(warped[0, 0, 1])
 
 
+# Suaviza exponencialmente un punto actual respecto al previo.
 def exponential_smooth(current: Tuple[float, float], previous: Optional[Tuple[float, float]], alpha: float) -> Tuple[float, float]:
     if previous is None:
         return current
@@ -68,6 +72,7 @@ def exponential_smooth(current: Tuple[float, float], previous: Optional[Tuple[fl
     )
 
 
+# Devuelve los vértices de la superficie en coordenadas de cámara usando homografía inversa.
 def surface_corners_in_camera(inverse_homography: np.ndarray, width: float, height: float) -> np.ndarray:
     corners = np.array(
         [
@@ -82,6 +87,69 @@ def surface_corners_in_camera(inverse_homography: np.ndarray, width: float, heig
     return camera_points.reshape(-1, 2)
 
 
+# Crea un frame BGRA para el proyector con canvas y efectos persistentes (sin UI ni video).
+def render_projector_overlay(
+    canvas_rgb: np.ndarray,
+    screen_width: int,
+    screen_height: int,
+    applied_masks: list,
+) -> np.ndarray:
+    # Escalar canvas al tamaño del proyector
+    canvas_display = cv2.cvtColor(canvas_rgb, cv2.COLOR_RGB2BGR)
+    overlay_rgb = cv2.resize(canvas_display, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
+    overlay_frame = np.zeros((screen_height, screen_width, 4), dtype=np.uint8)
+    overlay_color = overlay_frame[..., :3]
+    overlay_alpha = overlay_frame[..., 3]
+    
+    # Renderizar canvas: solo píxeles con contenido visible (no negros)
+    # Alpha proporcional a la intensidad del color para trazos suaves
+    canvas_intensity = np.max(overlay_rgb, axis=2)  # Max RGB channel per pixel
+    content_mask = canvas_intensity > 5  # Umbral bajo para detectar contenido
+    
+    overlay_color[:] = overlay_rgb
+    # Alpha 0 donde no hay contenido, 200 donde sí hay (semi-transparente para ver debajo)
+    overlay_alpha[content_mask] = 200
+    
+    # Renderizar efectos aplicados (BGRA con transparencia)
+    for (sx, sy, sw, sh, _produced_path, effect_patch) in applied_masks:
+        if effect_patch is None or effect_patch.ndim != 3 or effect_patch.shape[2] != 4:
+            continue
+            
+        x0 = max(0, min(int(sx), screen_width - 1))
+        y0 = max(0, min(int(sy), screen_height - 1))
+        x1 = max(x0 + 1, min(int(sx + sw), screen_width))
+        y1 = max(y0 + 1, min(int(sy + sh), screen_height))
+        sub_w = x1 - x0
+        sub_h = y1 - y0
+        
+        if sub_w <= 0 or sub_h <= 0:
+            continue
+        
+        # Resize effect patch to match display region
+        effect_resized = effect_patch
+        if effect_patch.shape[:2] != (sub_h, sub_w):
+            effect_resized = cv2.resize(effect_patch, (sub_w, sub_h), interpolation=cv2.INTER_LINEAR)
+        
+        # Composite the BGRA effect onto the overlay using alpha blending
+        effect_bgr = effect_resized[:, :, :3]
+        effect_alpha = effect_resized[:, :, 3].astype(np.float32) / 255.0
+        
+        # Blend color
+        for c in range(3):
+            overlay_color[y0:y1, x0:x1, c] = (
+                overlay_color[y0:y1, x0:x1, c] * (1 - effect_alpha) + 
+                effect_bgr[:, :, c] * effect_alpha
+            ).astype(np.uint8)
+        
+        # Update alpha to show the effect is visible
+        overlay_alpha[y0:y1, x0:x1] = np.maximum(
+            overlay_alpha[y0:y1, x0:x1],
+            (effect_alpha * 255).astype(np.uint8)
+        )
+
+    return overlay_frame
+
+
 # run_interactive_app recibe los argumentos CLI y la calibración y devuelve código de salida int.
 def run_interactive_app(args, calibration: CalibrationData) -> int:
     if not HAS_OVERLAY_SUPPORT:
@@ -90,8 +158,7 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
         )
         return 1
 
-    # Ensure Win32 screen coordinates match actual pixels (prevents capture offset on DPI-scaled displays).
-    # Must happen before creating any windows.
+    # Asegura coords Win32 reales (evita offset con DPI scaling) antes de crear ventanas.
     if hasattr(ctypes.windll, "user32") and hasattr(ctypes.windll.user32, "SetProcessDPIAware"):
         ctypes.windll.user32.SetProcessDPIAware()
 
@@ -114,10 +181,10 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
     )
     color_picker = ColorPicker()
     recognizer = RegionAnalyzer(model_dir=args.easyocr_models, use_gpu=args.easyocr_gpu)
-    # segmentation selector + segmenter using models/checkpoint_epoch_70.pth
+    # Selector de segmentación y segmenter con models/checkpoint_epoch_70.pth.
     segmenter = Segmenter()
     selection_tracker = SelectionGestureTracker()
-    # applied masks produced by segmenter, stored in screen coords (sx, sy, w, h, produced_path, mask)
+    # Efectos aplicados almacenados en coords de pantalla (sx, sy, w, h, ruta, BGRA).
     applied_masks = []
     active_recognition: Optional[RecognitionResult] = None
     recognition_display_until = 0.0
@@ -135,9 +202,49 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
         InteractionMode.ERASE: 0.0,
     }
 
-    screen_width = ctypes.windll.user32.GetSystemMetrics(0)
-    screen_height = ctypes.windll.user32.GetSystemMetrics(1)
-    overlay = OverlayWindow(screen_width, screen_height)
+    # Inicializa overlays en modo dual o monitor único.
+    dual_mode = getattr(args, "dual_monitor", False)
+    main_mon_idx = getattr(args, "main_monitor", 0)
+    proj_mon_idx = getattr(args, "projector_monitor", 1)
+    
+    if dual_mode:
+        # Modo dual: UI en principal, canvas en proyector.
+        monitors = enumerate_monitors()
+        if main_mon_idx >= len(monitors):
+            print(f"Monitor principal {main_mon_idx} no existe. Disponibles: {len(monitors)}")
+            return 1
+        if proj_mon_idx >= len(monitors):
+            print(f"Monitor proyector {proj_mon_idx} no existe. Disponibles: {len(monitors)}")
+            return 1
+        
+        main_mon = monitors[main_mon_idx]
+        proj_mon = monitors[proj_mon_idx]
+        
+        print(f"Modo dual-monitor:")
+        print(f"  Monitor principal ({main_mon_idx}): {main_mon[2]}x{main_mon[3]} @ ({main_mon[0]}, {main_mon[1]})")
+        print(f"  Monitor proyector ({proj_mon_idx}): {proj_mon[2]}x{proj_mon[3]} @ ({proj_mon[0]}, {proj_mon[1]})")
+        
+        main_overlay = OverlayWindow(
+            main_mon[2], main_mon[3], main_mon[0], main_mon[1],
+            title="NeuralPaint - Principal"
+        )
+        projector_overlay = OverlayWindow(
+            proj_mon[2], proj_mon[3], proj_mon[0], proj_mon[1],
+            title="NeuralPaint - Proyector"
+        )
+        
+        screen_width = main_mon[2]
+        screen_height = main_mon[3]
+        proj_width = proj_mon[2]
+        proj_height = proj_mon[3]
+    else:
+        # Modo monitor único (comportamiento por defecto).
+        screen_width = ctypes.windll.user32.GetSystemMetrics(0)
+        screen_height = ctypes.windll.user32.GetSystemMetrics(1)
+        main_overlay = OverlayWindow(screen_width, screen_height)
+        projector_overlay = None
+        proj_width = proj_height = 0
+    
     scale_x = screen_width / calibration.surface_width
     scale_y = screen_height / calibration.surface_height
     preview_scale = float(np.clip(args.preview_scale, 0.05, 0.5))
@@ -148,7 +255,7 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
         int(calibration.surface_height),
     )
 
-    # extract_surface_roi devuelve un recorte del lienzo alrededor del centro dado o None.
+    # Extrae un recorte del lienzo alrededor de un centro dado o None.
     def extract_surface_roi(surface_img: np.ndarray, center: Tuple[int, int]) -> Optional[Tuple[np.ndarray, Tuple[int, int]]]:
 
         roi_width = min(420, surface_dimensions[0])
@@ -165,7 +272,7 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             return None
         return patch, (x0, y0)
 
-    # try_request_recognition lanza OCR asincrónico si el puntero está dentro de la superficie.
+    # Lanza OCR asincrónico si el puntero está dentro de la superficie.
     def try_request_recognition(surface_img: np.ndarray, center: Optional[Tuple[int, int]]) -> bool:
         nonlocal last_recognition_request
         if center is None or recognizer.busy:
@@ -227,9 +334,7 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             left_hand = getattr(result, "left_hand_landmarks", None)
             right_hand = getattr(result, "right_hand_landmarks", None)
 
-            # Enter REGION_SELECT on the *rising edge* of both-index-up, BUT only if we're not
-            # already in REGION_SELECT mode. Once in the mode, stay there until explicitly exited.
-            # This prevents repeated resets while the user keeps both indexes up during selection.
+            # Entra a REGION_SELECT solo en flanco de ambos índices arriba y si no estaba ya activo.
             both_now = both_index_fingers_up(left_hand, right_hand)
             if both_now and not both_index_prev and interaction_mode != InteractionMode.REGION_SELECT:
                 selection_tracker.reset()
@@ -239,10 +344,7 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 print("[REGION] enter REGION_SELECT (both index edge)")
             both_index_prev = both_now
 
-            # Process arm commands - they work in all modes including REGION_SELECT.
-            # However, while a selection is actively in progress (anchor already set),
-            # ignore mode-toggle commands to avoid noisy arm classification interrupting
-            # the selection flow. CLEAR_ALL must still work at all times.
+            # Procesa comandos de brazo en todos los modos; si hay selección activa ignora toggles salvo CLEAR_ALL.
             command = command_classifier.update(raw_command)
             if interaction_mode == InteractionMode.REGION_SELECT and selection_tracker.anchor is not None:
                 if command != CommandType.CLEAR_ALL:
@@ -373,9 +475,9 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                     else:
                         stroke_canvas.add_point(pointer_surface_point)
 
-            # REGION_SELECT: fist to anchor + index up to confirm selection rect
+            # REGION_SELECT: index fingers to size rectangle, finger gestures to confirm with effect
             if interaction_mode == InteractionMode.REGION_SELECT:
-                rect = selection_tracker.update(
+                result = selection_tracker.update(
                     left_hand,
                     right_hand,
                     pointer_surface_point,
@@ -383,7 +485,8 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                     pointer_surface_right,
                 )
 
-                if rect is not None:
+                if result is not None:
+                    rect, effect_type = result
                     lx, ty, w, h = rect
                     lx = max(0, min(lx, int(calibration.surface_width) - 1))
                     ty = max(0, min(ty, int(calibration.surface_height) - 1))
@@ -402,16 +505,16 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                     sw = min(sw, screen_width - sx)
                     sh = min(sh, screen_height - sy)
 
-                    print(f"[REGION] capture request: surface=({lx},{ty},{w},{h}) screen=({sx},{sy},{sw},{sh})")
+                    print(f"[REGION] capture request: surface=({lx},{ty},{w},{h}) screen=({sx},{sy},{sw},{sh}) effect={effect_type}")
 
                     # capture ONLY what's literally on screen - no homography, no transformations
                     # this is the actual visible content the user selected
                     # Hide overlay before capture so the selection rectangle (and any overlay content)
                     # does not appear inside the captured patch.
-                    overlay.set_visible(False)
-                    overlay.pump_messages()
-                    patch_bgr = overlay.capture_region(sx, sy, sw, sh)
-                    overlay.set_visible(True)
+                    main_overlay.set_visible(False)
+                    main_overlay.pump_messages()
+                    patch_bgr = main_overlay.capture_region(sx, sy, sw, sh)
+                    main_overlay.set_visible(True)
 
                     print(f"[REGION] capture result: shape={getattr(patch_bgr, 'shape', None)} size={getattr(patch_bgr, 'size', None)}")
                     
@@ -424,10 +527,16 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                         if mask is not None and mask.size != 0:
                             if mask.shape[:2] != (sh, sw):
                                 mask = cv2.resize(mask, (sw, sh), interpolation=cv2.INTER_NEAREST)
-                            # store in screen coords for exact overlay placement
-                            applied_masks.append((sx, sy, sw, sh, produced_path, mask))
-                        elif produced_path is not None:
-                            applied_masks.append((sx, sy, sw, sh, produced_path, None))
+                            
+                            # Apply the selected effect to the captured patch
+                            # Get current drawing color in BGR format (already in BGR)
+                            current_color_bgr = stroke_canvas.brush_color
+                            print(f"[REGION] applying effect '{effect_type}' with color {current_color_bgr}")
+                            patch_with_effect = apply_effect(patch_bgr, mask, effect_type, current_color_bgr)
+
+                            # Store the effect-applied patch (BGRA) for overlay rendering.
+                            # Important: never display the produced mask image; keep it only as a saved artifact.
+                            applied_masks.append((sx, sy, sw, sh, produced_path, patch_with_effect))
                     else:
                         print("[REGION] capture invalid or wrong size; skipping inference")
 
@@ -473,12 +582,12 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
             overlay_color = overlay_frame[..., :3].copy()
             overlay_alpha = overlay_frame[..., 3].copy()
 
-            # apply any applied masks produced by the segmenter (persistent, already in screen coords)
+            # apply effects produced by the segmenter (persistent, already in screen coords)
             if applied_masks:
                 for entry in applied_masks:
                     if len(entry) != 6:
                         continue
-                    sx, sy, sw, sh, produced_path, mask_surface = entry
+                    sx, sy, sw, sh, _produced_path, effect_patch = entry
 
                     x0 = max(0, min(int(sx), screen_width - 1))
                     y0 = max(0, min(int(sy), screen_height - 1))
@@ -489,29 +598,28 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                     if sub_w <= 0 or sub_h <= 0:
                         continue
 
-                    produced_img = None
-                    if produced_path and os.path.exists(produced_path):
-                        produced_img = cv2.imread(produced_path, cv2.IMREAD_UNCHANGED)
-                        if produced_img is not None:
-                            if produced_img.ndim == 2:
-                                produced_img = cv2.cvtColor(produced_img, cv2.COLOR_GRAY2BGR)
-                            elif produced_img.shape[2] == 4:
-                                produced_img = cv2.cvtColor(produced_img, cv2.COLOR_BGRA2BGR)
-                            produced_img = cv2.resize(produced_img, (sub_w, sub_h), interpolation=cv2.INTER_AREA)
+                    if effect_patch is None or effect_patch.ndim != 3 or effect_patch.shape[2] != 4:
+                        continue
 
-                    if produced_img is not None:
-                        overlay_color[y0:y1, x0:x1] = produced_img[0:sub_h, 0:sub_w]
-                        overlay_alpha[y0:y1, x0:x1] = 230
-                    elif mask_surface is not None:
-                        if mask_surface.shape[:2] != (sub_h, sub_w):
-                            mask_surface = cv2.resize(mask_surface, (sub_w, sub_h), interpolation=cv2.INTER_NEAREST)
-                        mask_bool = mask_surface > 0
-                        patch_rgb = overlay_color[y0:y1, x0:x1]
-                        patch_rgb[mask_bool] = (255, 255, 255)
-                        overlay_color[y0:y1, x0:x1] = patch_rgb
-                        a_patch = overlay_alpha[y0:y1, x0:x1]
-                        a_patch[mask_bool] = 230
-                        overlay_alpha[y0:y1, x0:x1] = a_patch
+                    effect_resized = effect_patch
+                    if effect_patch.shape[:2] != (sub_h, sub_w):
+                        effect_resized = cv2.resize(effect_patch, (sub_w, sub_h), interpolation=cv2.INTER_LINEAR)
+
+                    effect_bgr = effect_resized[:, :, :3]
+                    effect_alpha = effect_resized[:, :, 3].astype(np.float32) / 255.0
+
+                    # Blend color
+                    for c in range(3):
+                        overlay_color[y0:y1, x0:x1, c] = (
+                            overlay_color[y0:y1, x0:x1, c] * (1 - effect_alpha)
+                            + effect_bgr[:, :, c] * effect_alpha
+                        ).astype(np.uint8)
+
+                    # Update alpha so the effect is visible
+                    overlay_alpha[y0:y1, x0:x1] = np.maximum(
+                        overlay_alpha[y0:y1, x0:x1],
+                        effect_resized[:, :, 3],
+                    )
 
             
 
@@ -588,8 +696,20 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
                 status_lines.append("Recon: error, revisa la consola")
             draw_status_banner(overlay_frame, status_lines)
 
-            overlay.update(np.ascontiguousarray(overlay_frame))
-            overlay.pump_messages()
+            # Actualizar overlay principal
+            main_overlay.update(np.ascontiguousarray(overlay_frame))
+            main_overlay.pump_messages()
+            
+            # Si modo dual-monitor, actualizar overlay del proyector (solo canvas)
+            if dual_mode and projector_overlay is not None:
+                projector_frame = render_projector_overlay(
+                    stroke_canvas.get_canvas(),
+                    proj_width,
+                    proj_height,
+                    applied_masks,
+                )
+                projector_overlay.update(np.ascontiguousarray(projector_frame))
+                projector_overlay.pump_messages()
 
             key_pressed = None
             if msvcrt and msvcrt.kbhit():  # pragma: no branch - lectura de teclado Windows
@@ -614,7 +734,9 @@ def run_interactive_app(args, calibration: CalibrationData) -> int:
     finally:
         cap.release()
         holistic.close()
-        overlay.close()
+        main_overlay.close()
+        if dual_mode and projector_overlay is not None:
+            projector_overlay.close()
         recognizer.close()
 
     return 0
